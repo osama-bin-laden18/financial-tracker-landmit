@@ -149,7 +149,7 @@ def test_project_files():
     # Validate Code.gs contains all actions (including v3 updateTransaction + v2 compare + batch reads)
     with open(os.path.join(PROJECT_DIR, "apps-script/Code.gs"), "r", encoding="utf-8") as f:
         code_gs = f.read()
-    for action in ("ping", "bootstrap", "savings", "compare", "addExpense", "addIncome", "addTransfer", "toggleMandatory", "addSavings", "deleteTransaction", "updateTransaction"):
+    for action in ("ping", "bootstrap", "savings", "compare", "addExpense", "addIncome", "addTransfer", "toggleMandatory", "addSavings", "deleteTransaction", "updateTransaction", "deductExpense"):
         assert f"case '{action}'" in code_gs, f"Missing handler in Code.gs: {action}"
     assert "LockService.getScriptLock()" in code_gs
     assert "CacheService.getScriptCache()" in code_gs
@@ -159,8 +159,10 @@ def test_project_files():
     assert "extractClassificationSummaryFromGrid_" in code_gs
     assert "extractOwnerSummaryFromGrid_" in code_gs
     assert "Utilities.parseDate(" in code_gs
+    assert "isRedHexColor_" in code_gs
+    assert "handleDeductExpense_" in code_gs
 
-    # Validate v3 PWA UI, 5 patches, and SW cache bump
+    # Validate v3 PWA UI, 5 patches, Patungan/Deduct, and SW cache bump
     with open(os.path.join(PROJECT_DIR, "web/index.html"), "r", encoding="utf-8") as f:
         idx_html = f.read()
         assert 'data-tab="compare"' in idx_html
@@ -168,14 +170,14 @@ def test_project_files():
         assert 'id="themeColorMeta"' in idx_html
     with open(os.path.join(PROJECT_DIR, "web/js/components.js"), "r", encoding="utf-8") as f:
         comp_js = f.read()
-        for fn in ("renderCompare", "renderRekonWalletModal", "renderEditTxModal", "buildExpensePresets"):
+        for fn in ("renderCompare", "renderRekonWalletModal", "renderDeductTxModal", "renderEditTxModal", "buildExpensePresets"):
             assert fn in comp_js, f"Missing {fn} in components.js"
     with open(os.path.join(PROJECT_DIR, "web/js/app.js"), "r", encoding="utf-8") as f:
         app_js = f.read()
-        for marker in ("findTransferPartner", "visibilitychange", "reqSeq", "openRekonWalletModal", "openEditTxModal"):
+        for marker in ("findTransferPartner", "visibilitychange", "reqSeq", "openRekonWalletModal", "openDeductTxModal", "openEditTxModal"):
             assert marker in app_js, f"Missing {marker} in app.js"
     with open(os.path.join(PROJECT_DIR, "web/sw.js"), "r", encoding="utf-8") as f:
-        assert "landmit-budget-v8" in f.read()
+        assert "landmit-budget-v9" in f.read()
 
     # Validate PNG magic bytes on all icons
     for sz in (180, 192, 512):

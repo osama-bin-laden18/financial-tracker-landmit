@@ -253,6 +253,14 @@
           <label class="form-label" for="txNotes">Catatan / Notes</label>
           <input id="txNotes" class="ios-input" type="text" placeholder="Contoh: indomaret, bbm agya, kopi fore..." value="${F.escapeHtml(formState.notes)}" />
         </div>
+        <label class="reimburse-toggle-card ${formState.reimbursable ? 'active' : ''}" id="txReimbursableCard">
+          <input id="txReimbursable" type="checkbox" ${formState.reimbursable ? 'checked' : ''} />
+          <div class="reimburse-toggle-text">
+            <div class="reimburse-toggle-title">🔴 Patungan / Akan Diganti</div>
+            <div class="reimburse-toggle-sub">Tandai merah di Riwayat &amp; Google Sheets agar mudah dikurangi nanti</div>
+          </div>
+          <span class="reimburse-pill" id="txReimbursablePill">${formState.reimbursable ? 'ON' : 'OFF'}</span>
+        </label>
       `;
     } else if (mode === 'income') {
       fieldsHtml = `
@@ -395,10 +403,14 @@
     } else {
       const q = (historyState.search || '').trim().toLowerCase();
       const filter = historyState.filter || 'all';
+      const reimbursableTxs = (data.transactions || []).filter((tx) => tx.type === 'expense' && tx.reimbursable);
+      const reimbursableTotal = reimbursableTxs.reduce((s, t) => s + (Number(t.amount) || 0), 0);
+
       const filtered = (data.transactions || []).filter((tx) => {
         if (filter === 'expense' && tx.type !== 'expense') return false;
         if (filter === 'income' && (tx.type !== 'income' || tx.category === 'Transfer')) return false;
         if (filter === 'transfer' && tx.category !== 'Transfer') return false;
+        if (filter === 'reimbursable' && !(tx.type === 'expense' && tx.reimbursable)) return false;
         if (q) {
           const hay = `${tx.category} ${tx.notes} ${tx.wallet} ${tx.owner}`.toLowerCase();
           if (!hay.includes(q)) return false;
@@ -415,6 +427,7 @@
       });
 
       const groupKeys = Object.keys(groups);
+      const reimbLabel = reimbursableTxs.length ? `🔴 Patungan (${reimbursableTxs.length})` : '🔴 Patungan';
 
       bodyHtml = `
         <section class="card">
@@ -423,23 +436,30 @@
             ${[
               ['all', 'Semua'],
               ['expense', 'Pengeluaran'],
+              ['reimbursable', reimbLabel],
               ['income', 'Pemasukan'],
               ['transfer', 'Transfer']
             ].map(([k, lbl]) => `
-              <button type="button" class="choice-chip ${filter === k ? 'selected' : ''}" data-tx-filter="${k}">${lbl}</button>
+              <button type="button" class="choice-chip ${k === 'reimbursable' ? 'reimburse-chip' : ''} ${filter === k ? 'selected' : ''}" data-tx-filter="${k}">${lbl}</button>
             `).join('')}
           </div>
+          ${(filter === 'reimbursable' && reimbursableTxs.length) ? `
+            <div class="reimburse-summary-bar">
+              <span>🔴 Belum diganti (${reimbursableTxs.length} item)</span>
+              <strong>${F.formatRupiah(reimbursableTotal)}</strong>
+            </div>
+          ` : ''}
         </section>
 
         <section class="card">
           <div class="section-header">
-            <h2 class="section-title">Transaksi Terbaru</h2>
+            <h2 class="section-title">${filter === 'reimbursable' ? 'Daftar Patungan / Akan Diganti' : 'Transaksi Terbaru'}</h2>
             <span class="section-sub">${filtered.length} baris</span>
           </div>
           ${groupKeys.length ? groupKeys.map((dateKey) => `
             <div class="tx-date-header">${F.formatDateID(dateKey)}</div>
             ${groups[dateKey].map((tx) => renderTransactionRow(tx, 'monthly')).join('')}
-          `).join('') : '<div class="empty-state">Tidak ada transaksi yang cocok.</div>'}
+          `).join('') : `<div class="empty-state">${filter === 'reimbursable' ? 'Tidak ada pengeluaran bertanda merah (Patungan) di bulan ini.' : 'Tidak ada transaksi yang cocok.'}</div>`}
         </section>
       `;
     }
@@ -457,31 +477,41 @@
 
   function renderTransactionRow(tx, scope) {
     const isTransfer = tx.category === 'Transfer';
+    const isReimbursable = scope === 'monthly' && tx.type === 'expense' && Boolean(tx.reimbursable);
     const amtClass = isTransfer ? 'tf' : (tx.type === 'expense' ? 'out' : 'in');
     const displayAmt = tx.type === 'expense'
-      ? '-' + F.formatRupiah(tx.amount)
+      ? (Number(tx.amount) === 0 ? F.formatRupiah(0) : '-' + F.formatRupiah(tx.amount))
       : F.formatRupiah(tx.amount, true);
     const title = tx.notes || tx.category || '(Tanpa catatan)';
     const metaParts = [tx.category, tx.wallet, tx.owner].filter(Boolean);
+    if (tx.amountFormula && tx.amountFormula.startsWith('=')) {
+      metaParts.push(tx.amountFormula);
+    }
     const isPending = Boolean(tx.pending);
+    const canDeduct = scope === 'monthly' && tx.type === 'expense' && !isPending && Number(tx.amount) > 0;
 
     return `
-      <div class="tx-item">
+      <div class="tx-item ${isReimbursable ? 'is-reimbursable' : ''}">
         <div class="tx-left ${isPending ? '' : 'editable'}" ${isPending ? '' : `data-edit-scope="${scope}" data-edit-type="${tx.type}" data-edit-row="${tx.row}"`}>
           <div class="tx-icon">${F.getCategoryIcon(tx.category)}</div>
           <div class="tx-meta">
-            <div class="tx-title">${F.escapeHtml(title)}${isPending ? ' <span style="font-size:11px;color:var(--text-tertiary);">⏳</span>' : ''}</div>
+            <div class="tx-title">
+              ${F.escapeHtml(title)}${isReimbursable ? ' <span class="reimburse-badge">Patungan</span>' : ''}${isPending ? ' <span style="font-size:11px;color:var(--text-tertiary);">⏳</span>' : ''}
+            </div>
             <div class="tx-sub">${F.escapeHtml(metaParts.join(' • '))}</div>
           </div>
         </div>
         <div class="tx-right">
-          <div class="tx-amount ${amtClass}">${displayAmt}</div>
-          ${isPending ? `
-            <button type="button" class="del-btn" disabled title="Menunggu konfirmasi Google Sheets...">⏳</button>
-          ` : `
-            <button type="button" class="edit-btn" title="Edit transaksi" data-edit-scope="${scope}" data-edit-type="${tx.type}" data-edit-row="${tx.row}">✏️</button>
-            <button type="button" class="del-btn" title="Hapus baris" data-delete-scope="${scope}" data-delete-type="${tx.type}" data-delete-row="${tx.row}" data-delete-label="${F.escapeHtml(title)}">✕</button>
-          `}
+          <div class="tx-amount ${amtClass} ${isReimbursable ? 'reimbursable-amt' : ''}">${displayAmt}</div>
+          <div class="tx-actions">
+            ${isPending ? `
+              <button type="button" class="del-btn" disabled title="Menunggu konfirmasi Google Sheets...">⏳</button>
+            ` : `
+              ${canDeduct ? `<button type="button" class="deduct-btn" title="Kurangi / Patungan Masuk" data-deduct-row="${tx.row}">➖</button>` : ''}
+              <button type="button" class="edit-btn" title="Edit transaksi" data-edit-scope="${scope}" data-edit-type="${tx.type}" data-edit-row="${tx.row}">✏️</button>
+              <button type="button" class="del-btn" title="Hapus baris" data-delete-scope="${scope}" data-delete-type="${tx.type}" data-delete-row="${tx.row}" data-delete-label="${F.escapeHtml(title)}">✕</button>
+            `}
+          </div>
         </div>
       </div>
     `;
@@ -913,6 +943,43 @@
     `;
   }
 
+  function renderDeductTxModal(tx) {
+    const curAmt = Number(tx.amount) || 0;
+    const title = tx.notes || tx.category || 'Pengeluaran';
+    const halfAmt = Math.round(curAmt / 2);
+
+    return `
+      <div class="sheet-handle"></div>
+      <div class="section-header">
+        <h2 class="section-title" style="font-size:17px;">➖ Kurangi / Patungan Masuk</h2>
+        <button type="button" class="icon-btn" id="closeModalBtn">✕</button>
+      </div>
+      <div class="delta-box" style="margin-bottom:12px;">
+        <div class="delta-label">${F.escapeHtml(title)} • ${F.escapeHtml(tx.wallet || '')}${tx.reimbursable ? ' • 🔴 Patungan' : ''}</div>
+        <div class="delta-val">${F.formatRupiah(curAmt, false, true)}</div>
+        ${tx.amountFormula ? `<div style="font-size:11px;color:var(--text-secondary);margin-top:3px;">Rumus saat ini: <code>${F.escapeHtml(tx.amountFormula)}</code></div>` : ''}
+      </div>
+      <form id="deductTxForm">
+        <div class="form-group" style="margin-top:0;">
+          <label class="form-label" for="deductAmount">Nominal yang Diganti / Dikurangi (Rp)</label>
+          <input id="deductAmount" class="ios-input" type="text" inputmode="text" placeholder="Contoh: 200.000 atau 100.000+50.000" autofocus required />
+          <div class="quick-amounts" style="justify-content:flex-start;margin-top:6px;">
+            ${halfAmt > 0 && halfAmt < curAmt ? `<button type="button" class="quick-chip" data-deduct-preset="half">50% (${F.formatCompact(halfAmt, true)})</button>` : ''}
+            <button type="button" class="quick-chip" data-deduct-preset="full">Diganti Penuh (100%)</button>
+          </div>
+        </div>
+        <div id="deductPreview"></div>
+        ${tx.reimbursable ? `
+          <label class="ios-switch" style="margin-top:12px;display:flex;padding:10px 12px;background:var(--surface-alt);border-radius:var(--radius-sm);">
+            <input type="checkbox" id="deductClearRed" checked />
+            <span>Tandai lunas (hilangkan warna merah di Riwayat &amp; Sheets)</span>
+          </label>
+        ` : ''}
+        <button type="submit" id="saveDeductBtn" class="primary-btn">Kurangi &amp; Simpan ke Sheet</button>
+      </form>
+    `;
+  }
+
   function renderEditTxModal(tx, scope, opts) {
     const isExp = tx.type === 'expense';
     const cats = isExp ? (opts.expenseCategories || []) : (opts.incomeCategories || []);
@@ -931,7 +998,7 @@
       <form id="editTxForm">
         <div class="form-group">
           <label class="form-label" for="editAmount">Nominal (Rp)${isNegIncome ? ' — nilai negatif Transfer' : ''}</label>
-          <input id="editAmount" class="ios-input" type="text" inputmode="text" value="${F.formatNumberInput(absAmt)}" required />
+          <input id="editAmount" class="ios-input" type="text" inputmode="text" value="${absAmt === 0 ? '0' : F.formatNumberInput(absAmt)}" required />
         </div>
         <div class="form-group">
           <label class="form-label" for="editDate">Tanggal</label>
@@ -956,12 +1023,14 @@
             <label class="form-label" for="editClass">Klasifikasi</label>
             <select id="editClass" class="ios-select">
               ${classes.map((cl) => `<option value="${F.escapeHtml(cl)}" ${cl === tx.classification ? 'selected' : ''}>${F.escapeHtml(cl)}</option>`).join('')}
+              ${tx.classification && !classes.includes(tx.classification) ? `<option value="${F.escapeHtml(tx.classification)}" selected>${F.escapeHtml(tx.classification)}</option>` : ''}
             </select>
           </div>
           <div class="form-group">
             <label class="form-label" for="editOwner">Peruntukan</label>
             <select id="editOwner" class="ios-select">
               ${owners.map((o) => `<option value="${F.escapeHtml(o)}" ${o === tx.owner ? 'selected' : ''}>${F.escapeHtml(o)}</option>`).join('')}
+              ${tx.owner && !owners.includes(tx.owner) ? `<option value="${F.escapeHtml(tx.owner)}" selected>${F.escapeHtml(tx.owner)}</option>` : ''}
             </select>
           </div>
         ` : (scope === 'monthly' ? `
@@ -977,6 +1046,16 @@
           <label class="form-label" for="editNotes">Catatan / Notes</label>
           <input id="editNotes" class="ios-input" type="text" value="${F.escapeHtml(tx.notes || '')}" />
         </div>
+        ${(scope === 'monthly' && isExp) ? `
+          <label class="reimburse-toggle-card ${tx.reimbursable ? 'active' : ''}" id="editReimbursableCard">
+            <input id="editReimbursable" type="checkbox" ${tx.reimbursable ? 'checked' : ''} />
+            <div class="reimburse-toggle-text">
+              <div class="reimburse-toggle-title">🔴 Patungan / Akan Diganti</div>
+              <div class="reimburse-toggle-sub">Tandai font merah di kolom Jumlah Google Sheets</div>
+            </div>
+            <span class="reimburse-pill" id="editReimbursablePill">${tx.reimbursable ? 'ON' : 'OFF'}</span>
+          </label>
+        ` : ''}
         <button type="submit" id="saveEditBtn" class="primary-btn">Simpan Perubahan ke Sheet</button>
       </form>
     `;
@@ -992,6 +1071,7 @@
     renderSettingsModal,
     renderSavingsModal,
     renderRekonWalletModal,
+    renderDeductTxModal,
     renderEditTxModal
   };
 })(window);

@@ -30,6 +30,7 @@
       adminFee: 0,
       notes: '',
       transferNotes: 'distribusi duit',
+      reimbursable: false,
       submitting: false
     },
     history: {
@@ -249,7 +250,9 @@
       classification: payload.classification,
       owner: payload.owner,
       wallet: payload.wallet,
-      notes: payload.notes
+      notes: payload.notes,
+      reimbursable: Boolean(payload.reimbursable),
+      amountFormula: ''
     });
     recalcMonthlySummary(d);
     persistMonthlyCache(d);
@@ -399,9 +402,40 @@
         if (newCl) newCl.total += newAmt;
       }
       Object.assign(tx, updated, { amount: newAmt });
+      if (tx.type === 'expense' && newAmt !== oldAmt) {
+        tx.amountFormula = '';
+      }
       recalcMonthlySummary(d);
       persistMonthlyCache(d);
     }
+  }
+
+  function applyOptimisticDeduct(tx, deductAmount, clearRed) {
+    if (!state.monthly || !tx) return;
+    const d = state.monthly;
+    const oldAmt = Number(tx.amount) || 0;
+    const deduct = Math.min(oldAmt, Math.max(0, Number(deductAmount) || 0));
+    const newAmt = Math.max(0, oldAmt - deduct);
+
+    d.summary.totalPengeluaran = Math.max(0, d.summary.totalPengeluaran - deduct);
+    const w = (d.wallets || []).find((x) => x.name === tx.wallet);
+    if (w) w.balance += deduct;
+
+    const c = (d.categorySummary || []).find((x) => x.category === tx.category);
+    if (c) c.total = Math.max(0, c.total - deduct);
+    const o = (d.ownerSummary || []).find((x) => x.name === tx.owner);
+    if (o) o.total = Math.max(0, o.total - deduct);
+    const cl = (d.classificationSummary || []).find((x) => x.name === tx.classification);
+    if (cl) cl.total = Math.max(0, cl.total - deduct);
+
+    tx.amountFormula = (tx.amountFormula && tx.amountFormula.startsWith('='))
+      ? `${tx.amountFormula}-${deduct}`
+      : `=${Math.round(oldAmt)}-${deduct}`;
+    tx.amount = newAmt;
+    if (clearRed) tx.reimbursable = false;
+
+    recalcMonthlySummary(d);
+    persistMonthlyCache(d);
   }
 
   function persistMonthlyCache(d) {
@@ -656,6 +690,17 @@
       });
     }
 
+    const reimbCb = document.getElementById('txReimbursable');
+    if (reimbCb) {
+      reimbCb.addEventListener('change', () => {
+        state.form.reimbursable = reimbCb.checked;
+        const card = document.getElementById('txReimbursableCard');
+        const pill = document.getElementById('txReimbursablePill');
+        if (card) card.classList.toggle('active', reimbCb.checked);
+        if (pill) pill.textContent = reimbCb.checked ? 'ON' : 'OFF';
+      });
+    }
+
     // Preset 1-tap ("Sering Dipakai")
     const presets = C.buildExpensePresets(state.monthly);
     form.querySelectorAll('[data-preset-idx]').forEach((btn) => {
@@ -748,7 +793,8 @@
           classification: state.form.classification,
           owner: state.form.owner,
           wallet: state.form.wallet,
-          notes: state.form.notes
+          notes: state.form.notes,
+          reimbursable: Boolean(state.form.reimbursable)
         };
         applyOptimisticExpense(payload, tempRow);
       } else if (mode === 'income') {
@@ -776,11 +822,12 @@
         applyOptimisticTransfer(payload, tempRow);
       }
 
-      // Reset form nominal & notes
+      // Reset form nominal, notes & patungan toggle
       state.form.amount = 0;
       state.form.amountExpr = '';
       state.form.notes = '';
       state.form.adminFee = 0;
+      state.form.reimbursable = false;
       if (!stayOnInput) {
         state.tab = 'dashboard';
       }
@@ -907,8 +954,21 @@
       });
     });
 
+    bindDeductButtons();
     bindEditButtons();
     bindDeleteButtons();
+  }
+
+  function bindDeductButtons() {
+    mainEl.querySelectorAll('[data-deduct-row]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const row = parseInt(btn.dataset.deductRow, 10);
+        if (!state.monthly) return;
+        const tx = (state.monthly.transactions || []).find((t) => t.row === row && t.type === 'expense');
+        if (!tx || tx.pending) return;
+        openDeductTxModal(tx);
+      });
+    });
   }
 
   function bindSavingsEvents() {
@@ -1070,6 +1130,101 @@
     inputEl.addEventListener('input', updateDiff);
   }
 
+  function openDeductTxModal(tx) {
+    modalSheet.innerHTML = C.renderDeductTxModal(tx);
+    modalOverlay.classList.remove('hidden');
+
+    document.getElementById('closeModalBtn').addEventListener('click', closeModal);
+    const inputEl = document.getElementById('deductAmount');
+    const previewEl = document.getElementById('deductPreview');
+    const curAmt = Math.round(Number(tx.amount) || 0);
+
+    function updatePreview() {
+      const ev = F.evaluateAmountExpr(inputEl.value);
+      inputEl.value = ev.display || '';
+      const d = ev.value || 0;
+      if (!d) {
+        previewEl.innerHTML = '';
+        return;
+      }
+      if (d > curAmt) {
+        previewEl.innerHTML = `
+          <div class="rekon-diff-box minus">
+            <div style="font-weight:800;font-size:14px;">Melebihi nominal saat ini</div>
+            <div style="font-size:12px;margin-top:3px;">Maksimal pengurangan adalah ${F.formatRupiah(curAmt, false, true)}.</div>
+          </div>
+        `;
+        return;
+      }
+      const rem = curAmt - d;
+      previewEl.innerHTML = `
+        <div class="rekon-diff-box ${rem === 0 ? 'ok' : 'plus'}">
+          <div style="font-size:12px;opacity:0.85;">${F.formatRupiah(curAmt, false, true)} − ${F.formatRupiah(d, false, true)}</div>
+          <div style="font-weight:800;font-size:16px;margin-top:3px;">
+            ${rem === 0 ? '✓ Sisa Rp 0 (Diganti Penuh!)' : 'Sisa Pengeluaran: ' + F.formatRupiah(rem, false, true)}
+          </div>
+        </div>
+      `;
+    }
+
+    inputEl.addEventListener('input', updatePreview);
+
+    modalSheet.querySelectorAll('[data-deduct-preset]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const preset = btn.dataset.deductPreset;
+        const val = preset === 'full' ? curAmt : Math.round(curAmt / 2);
+        inputEl.value = F.formatNumberInput(val);
+        updatePreview();
+      });
+    });
+
+    document.getElementById('deductTxForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const ev = F.evaluateAmountExpr(inputEl.value);
+      const deductVal = ev.value || 0;
+      if (!deductVal || deductVal <= 0) {
+        showToast('Isi nominal pengurangan terlebih dahulu.', 'error');
+        return;
+      }
+      if (deductVal > curAmt) {
+        showToast('Nominal pengurangan melebihi nominal saat ini.', 'error');
+        return;
+      }
+
+      const clearRedEl = document.getElementById('deductClearRed');
+      const clearRed = clearRedEl ? Boolean(clearRedEl.checked) : false;
+      const snapshot = state.monthly ? clone(state.monthly) : null;
+      const activeSheet = state.monthly ? state.monthly.activeMonth : '';
+
+      applyOptimisticDeduct(tx, deductVal, clearRed);
+      closeModal();
+      renderActiveTab();
+      refreshBtn.classList.add('spinning');
+      showToast('Menyimpan pengurangan ke Google Sheets...');
+
+      try {
+        await Api.deductExpense({
+          sheet: activeSheet,
+          row: tx.row,
+          deductAmount: deductVal,
+          clearRed
+        });
+        state.compare = null;
+        loadMonthly(activeSheet, true);
+        showToast(`Dikurangi ${F.formatRupiah(deductVal, false, true)} ✓`, 'success');
+      } catch (err) {
+        if (snapshot) { state.monthly = snapshot; persistMonthlyCache(snapshot); }
+        renderActiveTab();
+        const msg = (err.message || '').includes('deductExpense')
+          ? 'Update Code.gs terbaru di Apps Script dulu untuk mengaktifkan fitur Kurangi / Patungan.'
+          : (err.message || 'Gagal mengurangi transaksi');
+        showToast(msg, 'error');
+      } finally {
+        refreshBtn.classList.remove('spinning');
+      }
+    });
+  }
+
   function openEditTxModal(tx, scope, opts) {
     modalSheet.innerHTML = C.renderEditTxModal(tx, scope, opts);
     modalOverlay.classList.remove('hidden');
@@ -1077,17 +1232,32 @@
     document.getElementById('closeModalBtn').addEventListener('click', closeModal);
     const amtEl = document.getElementById('editAmount');
     const isNegIncome = tx.type === 'income' && Number(tx.amount) < 0;
+    const allowZero = scope === 'monthly' && tx.type === 'expense';
 
     amtEl.addEventListener('input', () => {
-      const ev = F.evaluateAmountExpr(amtEl.value);
-      amtEl.value = ev.display || '';
+      const raw = amtEl.value.trim();
+      if (allowZero && raw === '0') return;
+      const ev = F.evaluateAmountExpr(raw);
+      amtEl.value = (allowZero && /[0-9]/.test(raw) && ev.value === 0 && !ev.isExpression) ? '0' : (ev.display || '');
     });
+
+    const editReimbCb = document.getElementById('editReimbursable');
+    if (editReimbCb) {
+      editReimbCb.addEventListener('change', () => {
+        const card = document.getElementById('editReimbursableCard');
+        const pill = document.getElementById('editReimbursablePill');
+        if (card) card.classList.toggle('active', editReimbCb.checked);
+        if (pill) pill.textContent = editReimbCb.checked ? 'ON' : 'OFF';
+      });
+    }
 
     document.getElementById('editTxForm').addEventListener('submit', async (e) => {
       e.preventDefault();
-      const ev = F.evaluateAmountExpr(amtEl.value);
-      if (!ev.value || ev.value <= 0) {
-        showToast('Nominal harus lebih dari 0.', 'error');
+      const rawAmt = amtEl.value.trim();
+      const hasDigits = /[0-9]/.test(rawAmt);
+      const ev = F.evaluateAmountExpr(rawAmt);
+      if (!hasDigits || (!allowZero && ev.value <= 0)) {
+        showToast(allowZero ? 'Isi nominal (minimal 0).' : 'Nominal harus lebih dari 0.', 'error');
         return;
       }
 
@@ -1101,6 +1271,9 @@
         owner: document.getElementById('editOwner') ? document.getElementById('editOwner').value : (tx.owner || ''),
         notes: document.getElementById('editNotes').value.trim()
       };
+      if (editReimbCb) {
+        updated.reimbursable = Boolean(editReimbCb.checked);
+      }
 
       const snapshotMonthly = state.monthly ? clone(state.monthly) : null;
       const snapshotSavings = state.savings ? clone(state.savings) : null;

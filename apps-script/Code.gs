@@ -105,6 +105,9 @@ function doPost(e) {
       case 'updateTransaction':
         result = handleUpdateTransaction_(payload);
         break;
+      case 'deductExpense':
+        result = handleDeductExpense_(payload);
+        break;
       default:
         throw new Error('Action POST tidak dikenal: ' + action);
     }
@@ -427,6 +430,7 @@ function handleAddExpense_(payload) {
   const owner = requireString_(payload.owner || 'Bersama', 'Peruntukan');
   const wallet = requireString_(payload.wallet, 'Rek Debit');
   const notes = String(payload.notes || '').trim();
+  const reimbursable = Boolean(payload.reimbursable);
 
   const row = findFirstEmptyRowFast_(sheet, 15, 16, 17); // Col O(15), P(16), Q(17)
   const seqNo = row - CONFIG.DATA_START_ROW + 1;
@@ -443,10 +447,14 @@ function handleAddExpense_(payload) {
     notes
   ]]);
 
+  // Tandai font merah di kolom P jika Patungan / Akan Diganti (atau reset ke normal)
+  sheet.getRange(row, 16).setFontColor(reimbursable ? '#ff0000' : null);
+
   return {
     row: row,
     sheet: sheet.getName(),
     type: 'expense',
+    reimbursable: reimbursable,
     serverTime: new Date().toISOString()
   };
 }
@@ -647,6 +655,8 @@ function handleDeleteTransaction_(payload) {
     sheet.getRange(row, 7, 1, 6).clearContent();
   } else if (type === 'expense') {
     sheet.getRange(row, 15, 1, 7).clearContent();
+    // Reset warna font merah (Patungan) agar baris kosong tidak mewarisi warna lama
+    sheet.getRange(row, 16).setFontColor(null);
   } else {
     throw new Error('Tipe transaksi tidak valid.');
   }
@@ -698,16 +708,26 @@ function handleUpdateTransaction_(payload) {
 
   const sheet = getTargetMonthSheet_(ss, payload.sheet);
   if (type === 'expense') {
-    const amount = parsePositiveAmount_(payload.amount, 'Jumlah pengeluaran');
+    const amount = parseNonNegativeAmount_(payload.amount, 'Jumlah pengeluaran');
+    const pCell = sheet.getRange(row, 16);
+    const existingFormula = String(pCell.getFormula() || '').trim();
+    const existingVal = toNumber_(pCell.getValue());
+    // Pertahankan rumus pengurangan (misal =310134-200000) bila nominal tidak berubah
+    const amountCellVal = (existingFormula && Math.round(existingVal) === amount) ? existingFormula : amount;
+
     sheet.getRange(row, 15, 1, 7).setValues([[
       dateObj,
-      amount,
+      amountCellVal,
       requireString_(payload.category, 'Kategori'),
       requireString_(payload.classification || 'Kebutuhan', 'Klasifikasi'),
       requireString_(payload.owner || 'Bersama', 'Peruntukan'),
       requireString_(payload.wallet, 'Rek Debit'),
       String(payload.notes || '').trim()
     ]]);
+
+    if (typeof payload.reimbursable === 'boolean') {
+      pCell.setFontColor(payload.reimbursable ? '#ff0000' : null);
+    }
   } else if (type === 'income') {
     const amount = parseNonZeroAmount_(payload.amount, 'Jumlah pemasukan');
     sheet.getRange(row, 7, 1, 6).setValues([[
@@ -727,6 +747,52 @@ function handleUpdateTransaction_(payload) {
     scope: scope,
     type: type,
     sheet: sheet.getName(),
+    serverTime: new Date().toISOString()
+  };
+}
+
+function handleDeductExpense_(payload) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = getTargetMonthSheet_(ss, payload.sheet);
+  const row = parseInt(payload.row, 10);
+
+  if (isNaN(row) || row < CONFIG.DATA_START_ROW || row > CONFIG.DATA_MAX_ROW) {
+    throw new Error('Nomor baris tidak valid: ' + payload.row);
+  }
+
+  const deductAmount = parsePositiveAmount_(payload.deductAmount, 'Nominal pengurangan');
+  const pCell = sheet.getRange(row, 16); // Kolom P (Jumlah Pengeluaran)
+  const currentVal = toNumber_(pCell.getValue());
+  const currentFormula = String(pCell.getFormula() || '').trim();
+
+  if (currentVal <= 0) {
+    throw new Error('Nominal transaksi saat ini sudah Rp 0.');
+  }
+  if (deductAmount > Math.round(currentVal)) {
+    throw new Error('Nominal pengurangan (Rp ' + deductAmount + ') melebihi nominal saat ini (Rp ' + Math.round(currentVal) + ').');
+  }
+
+  // Simpan sebagai rumus pengurangan gaya spreadsheet (=310134-200000 atau sambung -160000)
+  const newFormula = (currentFormula && /^=/.test(currentFormula))
+    ? (currentFormula + '-' + deductAmount)
+    : ('=' + Math.round(currentVal) + '-' + deductAmount);
+
+  pCell.setFormula(newFormula);
+
+  const clearRed = Boolean(payload.clearRed);
+  if (clearRed) {
+    pCell.setFontColor(null);
+  }
+
+  const newAmount = Math.max(0, Math.round(currentVal - deductAmount));
+  return {
+    row: row,
+    sheet: sheet.getName(),
+    previousAmount: Math.round(currentVal),
+    deducted: deductAmount,
+    newAmount: newAmount,
+    formula: newFormula,
+    reimbursable: clearRed ? false : isRedHexColor_(pCell.getFontColor()),
     serverTime: new Date().toISOString()
   };
 }
@@ -944,9 +1010,12 @@ function readMonthlyTransactionsFast_(sheet, tz, limit) {
   if (lastRow < CONFIG.DATA_START_ROW) return [];
 
   const numRows = lastRow - CONFIG.DATA_START_ROW + 1;
-  // 1 batch read tunggal G18:U{lastRow} (15 kolom)
+  // 1 batch read tunggal G18:U{lastRow} (15 kolom) + warna font & rumus kolom P (Patungan/Pengurangan)
   // G..L = idx 0..5, O..U = idx 8..14
   const vals = sheet.getRange(CONFIG.DATA_START_ROW, 7, numRows, 15).getValues();
+  const pRange = sheet.getRange(CONFIG.DATA_START_ROW, 16, numRows, 1);
+  const pFontColors = pRange.getFontColors();
+  const pFormulas = pRange.getFormulas();
   const list = [];
 
   for (let i = 0; i < vals.length; i++) {
@@ -981,7 +1050,9 @@ function readMonthlyTransactionsFast_(sheet, tz, limit) {
         classification: String(r[11] || '').trim(),
         owner: String(r[12] || '').trim(),
         wallet: String(r[13] || '').trim(),
-        notes: String(r[14] || '').trim()
+        notes: String(r[14] || '').trim(),
+        reimbursable: isRedHexColor_(pFontColors[i][0]),
+        amountFormula: String(pFormulas[i][0] || '').trim()
       });
     }
   }
@@ -991,7 +1062,18 @@ function readMonthlyTransactionsFast_(sheet, tz, limit) {
     return b.row - a.row;
   });
 
-  return list.slice(0, limit);
+  // Selalu sertakan seluruh transaksi bertanda merah (Patungan) walau lebih lama dari limit 40 terbaru
+  const top = list.slice(0, limit);
+  const includedIds = {};
+  top.forEach(function (t) { includedIds[t.id] = true; });
+  list.slice(limit).forEach(function (t) {
+    if (t.reimbursable && !includedIds[t.id]) {
+      top.push(t);
+      includedIds[t.id] = true;
+    }
+  });
+
+  return top;
 }
 
 function readSavingsTransactionsFast_(sheet, tz, limit) {
@@ -1079,6 +1161,24 @@ function parsePositiveAmount_(val, label) {
     throw new Error(label + ' harus lebih dari 0.');
   }
   return Math.round(num);
+}
+
+function parseNonNegativeAmount_(val, label) {
+  const num = toNumber_(val);
+  if (!isFinite(num) || num < 0) {
+    throw new Error(label + ' tidak boleh negatif.');
+  }
+  return Math.round(num);
+}
+
+function isRedHexColor_(hex) {
+  if (!hex) return false;
+  const m = String(hex).trim().match(/^#?([0-9a-f]{6})$/i);
+  if (!m) return false;
+  const r = parseInt(m[1].slice(0, 2), 16);
+  const g = parseInt(m[1].slice(2, 4), 16);
+  const b = parseInt(m[1].slice(4, 6), 16);
+  return r >= 150 && (r - Math.max(g, b)) >= 40;
 }
 
 function parseNonZeroAmount_(val, label) {

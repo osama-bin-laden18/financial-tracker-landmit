@@ -187,8 +187,8 @@
           ]
         },
         transactions: [
-          { id: 'out-261', row: 261, type: 'expense', date: today, amount: 86000, category: 'Pangan', classification: 'Kebutuhan', owner: 'Bersama', wallet: 'BCA (Olan)', notes: 'kfc (contoh)' },
-          { id: 'out-260', row: 260, type: 'expense', date: today, amount: 72000, category: 'Kopi', classification: 'Keinginan', owner: 'Bersama', wallet: 'BRI', notes: 'kopi sore (contoh)' },
+          { id: 'out-261', row: 261, type: 'expense', date: today, amount: 310134, category: 'Bayar Tagihan', classification: 'Kebutuhan', owner: 'Bersama', wallet: 'BRI', notes: 'wifi (contoh patungan)', reimbursable: true, amountFormula: '' },
+          { id: 'out-260', row: 260, type: 'expense', date: today, amount: 72000, category: 'Kopi', classification: 'Keinginan', owner: 'Bersama', wallet: 'BRI', notes: 'kopi sore (contoh)', reimbursable: false, amountFormula: '' },
           { id: 'in-79', row: 79, type: 'income', date: today, amount: 150000, category: 'Transfer', owner: '', wallet: 'Ovo (Mitry)', notes: 'distribusi duit' },
           { id: 'in-78', row: 78, type: 'income', date: today, amount: -150000, category: 'Transfer', owner: '', wallet: 'BRI', notes: 'distribusi duit' }
         ]
@@ -328,7 +328,9 @@
           id: 'out-' + row, row, type: 'expense',
           date: payload.date, amount: amt, category: payload.category,
           classification: payload.classification, owner: payload.owner,
-          wallet: payload.wallet, notes: payload.notes
+          wallet: payload.wallet, notes: payload.notes,
+          reimbursable: Boolean(payload.reimbursable),
+          amountFormula: ''
         });
         d.summary.totalPengeluaran += amt;
         const w = d.wallets.find(x => x.name === payload.wallet);
@@ -506,13 +508,39 @@
           Object.assign(tx, {
             date: payload.date, amount: newAmt, category: payload.category,
             classification: payload.classification || '', owner: payload.owner || '',
-            wallet: payload.wallet, notes: payload.notes || ''
+            wallet: payload.wallet, notes: payload.notes || '',
+            reimbursable: typeof payload.reimbursable === 'boolean' ? payload.reimbursable : Boolean(tx.reimbursable)
           });
           recalcDemoMonthly(d);
         }
         return { updatedRow: payload.row };
       }
       return livePost('updateTransaction', payload);
+    },
+
+    async deductExpense(payload) {
+      const cfg = getSettings();
+      if (cfg.demoMode) {
+        const d = getDemo().monthly;
+        const tx = d.transactions.find(t => t.row === payload.row && t.type === 'expense');
+        if (tx) {
+          const deduct = Number(payload.deductAmount) || 0;
+          const prev = Number(tx.amount) || 0;
+          const next = Math.max(0, prev - deduct);
+          tx.amountFormula = (tx.amountFormula && tx.amountFormula.startsWith('='))
+            ? `${tx.amountFormula}-${deduct}`
+            : `=${prev}-${deduct}`;
+          tx.amount = next;
+          if (payload.clearRed) tx.reimbursable = false;
+          d.summary.totalPengeluaran = Math.max(0, d.summary.totalPengeluaran - deduct);
+          const w = d.wallets.find(x => x.name === tx.wallet);
+          if (w) w.balance += deduct;
+          recalcDemoMonthly(d);
+          return { row: payload.row, previousAmount: prev, deducted: deduct, newAmount: next, formula: tx.amountFormula, reimbursable: tx.reimbursable };
+        }
+        return { row: payload.row };
+      }
+      return livePost('deductExpense', payload);
     }
   };
 
