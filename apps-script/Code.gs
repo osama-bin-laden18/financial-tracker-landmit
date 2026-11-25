@@ -223,8 +223,12 @@ function handleBootstrap_(requestedSheetName) {
   // Dropdown options dinamis dari grid
   const incomeCategories = readUniqueFromGrid_(grid, 6, 2, 18, 34, 2);   // B18:B34
   const expenseCategories = readUniqueFromGrid_(grid, 6, 2, 18, 34, 4);  // D18:D34
-  const classifications = readUniqueFromGrid_(grid, 6, 2, 46, 47, 2);    // B46:B47
-  const owners = readUniqueFromGrid_(grid, 6, 2, 46, 49, 4);             // D46:D49
+  const classifications = readUniqueFromGrid_(grid, 6, 2, 45, 51, 2).filter(function (v) {
+    return !/^(klasifikasi|jumlah|total|m\s*a\s*n\s*d\s*a\s*t\s*o\s*r\s*y)$/i.test(v);
+  });
+  const owners = readUniqueFromGrid_(grid, 6, 2, 45, 51, 4).filter(function (v) {
+    return !/^(none|peruntukan|keterangan|jumlah|total)$/i.test(v) && !/^\d+(\.\d+)?$/.test(v);
+  });
   const walletOptions = wallets.map(function (w) { return w.name; });
 
   // Rekap pengeluaran per kategori (W18:Y34 -> col 23, 24, 25)
@@ -416,7 +420,7 @@ function handleAddExpense_(payload) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = getTargetMonthSheet_(ss, payload.sheet);
 
-  const dateObj = parseDateInput_(payload.date);
+  const dateObj = parseDateInput_(payload.date, ss.getSpreadsheetTimeZone());
   const amount = parsePositiveAmount_(payload.amount, 'Jumlah pengeluaran');
   const category = requireString_(payload.category, 'Kategori');
   const classification = requireString_(payload.classification || 'Kebutuhan', 'Klasifikasi');
@@ -451,7 +455,7 @@ function handleAddIncome_(payload) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = getTargetMonthSheet_(ss, payload.sheet);
 
-  const dateObj = parseDateInput_(payload.date);
+  const dateObj = parseDateInput_(payload.date, ss.getSpreadsheetTimeZone());
   const amount = parseNonZeroAmount_(payload.amount, 'Jumlah pemasukan');
   const category = requireString_(payload.category, 'Kategori');
   const owner = String(payload.owner || '').trim();
@@ -484,7 +488,7 @@ function handleAddTransfer_(payload) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = getTargetMonthSheet_(ss, payload.sheet);
 
-  const dateObj = parseDateInput_(payload.date);
+  const dateObj = parseDateInput_(payload.date, ss.getSpreadsheetTimeZone());
   const amount = parsePositiveAmount_(payload.amount, 'Nominal transfer');
   const fromWallet = requireString_(payload.fromWallet, 'Rekening asal');
   const toWallet = requireString_(payload.toWallet, 'Rekening tujuan');
@@ -565,7 +569,7 @@ function handleAddSavings_(payload) {
   }
 
   const mode = String(payload.mode || 'income').trim();
-  const dateObj = parseDateInput_(payload.date);
+  const dateObj = parseDateInput_(payload.date, ss.getSpreadsheetTimeZone());
   const wallet = requireString_(payload.wallet, 'Rekening Tabungan');
 
   if (mode === 'income') {
@@ -665,7 +669,7 @@ function handleUpdateTransaction_(payload) {
     throw new Error('Nomor baris tidak valid: ' + payload.row);
   }
 
-  const dateObj = parseDateInput_(payload.date);
+  const dateObj = parseDateInput_(payload.date, ss.getSpreadsheetTimeZone());
 
   if (scope === 'savings') {
     const sheet = ss.getSheetByName(CONFIG.SAVINGS_SHEET_NAME);
@@ -1043,16 +1047,22 @@ function readSavingsTransactionsFast_(sheet, tz, limit) {
   return list.slice(0, limit);
 }
 
-function parseDateInput_(dateStr) {
+function parseDateInput_(dateStr, tz) {
+  // Wajib pakai timezone Spreadsheet (bukan timezone project Apps Script)
+  // agar tanggal tidak bergeser -1 hari (misal GMT+8 script -> GMT+7 sheet jadi jam 23:00 hari sebelumnya)
+  const zone = tz || SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
   if (!dateStr) {
-    const now = new Date();
-    return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const todayStr = Utilities.formatDate(new Date(), zone, 'yyyy-MM-dd');
+    return Utilities.parseDate(todayStr, zone, 'yyyy-MM-dd');
   }
   const match = String(dateStr).trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (!match) {
     throw new Error('Format tanggal tidak valid (gunakan YYYY-MM-DD): ' + dateStr);
   }
-  return new Date(parseInt(match[1], 10), parseInt(match[2], 10) - 1, parseInt(match[3], 10));
+  const y = match[1];
+  const m = ('0' + parseInt(match[2], 10)).slice(-2);
+  const d = ('0' + parseInt(match[3], 10)).slice(-2);
+  return Utilities.parseDate(y + '-' + m + '-' + d, zone, 'yyyy-MM-dd');
 }
 
 function formatDateValue_(val, tz) {

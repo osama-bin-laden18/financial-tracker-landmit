@@ -158,6 +158,7 @@ def test_project_files():
     assert "extractWalletBlockFromGrid_" in code_gs
     assert "extractClassificationSummaryFromGrid_" in code_gs
     assert "extractOwnerSummaryFromGrid_" in code_gs
+    assert "Utilities.parseDate(" in code_gs
 
     # Validate v3 PWA UI, 5 patches, and SW cache bump
     with open(os.path.join(PROJECT_DIR, "web/index.html"), "r", encoding="utf-8") as f:
