@@ -103,15 +103,15 @@
       if (!isNaN(n)) total += n;
     }
 
-    // Format expression tokens nicely with thousand separators while keeping trailing operator
+    // Format tanpa spasi di belakang operator agar tombol Backspace di iPhone tidak pernah mentok
     const trailingOp = /[+\-]$/.test(cleaned) ? cleaned.slice(-1) : '';
     const pretty = tokens.map((tok, idx) => {
       const sign = tok[0] === '+' || tok[0] === '-' ? tok[0] : '';
       const digits = sign ? tok.slice(1) : tok;
       const fmt = digits.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
       if (idx === 0) return sign + fmt;
-      return ' ' + sign + ' ' + fmt;
-    }).join('') + (trailingOp ? ' ' + trailingOp + ' ' : '');
+      return sign + fmt;
+    }).join('') + trailingOp;
 
     return {
       value: Math.max(0, Math.round(total)),

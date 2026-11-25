@@ -1007,13 +1007,14 @@
 
     function updateDiff() {
       const raw = inputEl.value.trim();
-      if (!raw) {
+      const hasDigits = /[0-9]/.test(raw);
+      if (!raw || !hasDigits) {
         diffArea.innerHTML = '';
         return;
       }
       const isNeg = raw.startsWith('-');
       const absNum = F.parseNumberInput(raw);
-      inputEl.value = (isNeg ? '-' : '') + (absNum ? F.formatNumberInput(absNum) : '');
+      inputEl.value = (isNeg ? '-' : '') + (absNum === 0 ? '0' : F.formatNumberInput(absNum));
       const actual = isNeg ? -absNum : absNum;
       const diff = actual - bookBalance;
 

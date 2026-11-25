@@ -7,19 +7,39 @@
   // 1. DASHBOARD & REKON
   // ==========================================================================
 
+  const MONTH_INDEX_MAP = {
+    JANUARI: 0, FEBRUARI: 1, MARET: 2, APRIL: 3, MEI: 4, JUNI: 5,
+    JULI: 6, AGUSTUS: 7, SEPTEMBER: 8, OKTOBER: 9, NOVEMBER: 10, DESEMBER: 11
+  };
+
   function computeTodayStats(data) {
     const today = F.todayISO();
     const expenses = (data.transactions || []).filter((t) => t.type === 'expense');
     const todayTx = expenses.filter((t) => t.date === today);
     const todayTotal = todayTx.reduce((s, t) => s + (Number(t.amount) || 0), 0);
 
-    // Estimasi rata-rata harian bulan ini berdasarkan jumlah hari aktif atau tanggal hari ini
-    const distinctDays = new Set(expenses.map((t) => t.date).filter(Boolean)).size;
     const totalOut = Number((data.summary || {}).totalPengeluaran) || 0;
-    const dayDivisor = Math.max(1, distinctDays || new Date().getDate());
-    const dailyAvg = Math.round(totalOut / dayDivisor);
+    const now = new Date();
+    const mIdx = MONTH_INDEX_MAP[String(data.activeMonth || '').toUpperCase()];
+    const yearNum = parseInt(data.yearLabel, 10) || now.getFullYear();
+    const distinctDays = new Set(expenses.map((t) => t.date).filter(Boolean)).size;
 
-    return { todayTotal, todayCount: todayTx.length, dailyAvg, activeDays: distinctDays };
+    let dayDivisor = now.getDate();
+    if (typeof mIdx === 'number') {
+      if (yearNum < now.getFullYear() || (yearNum === now.getFullYear() && mIdx < now.getMonth())) {
+        // Bulan lampau: bagi dengan jumlah hari penuh di bulan tersebut
+        dayDivisor = new Date(yearNum, mIdx + 1, 0).getDate();
+      } else if (yearNum === now.getFullYear() && mIdx === now.getMonth()) {
+        // Bulan berjalan: bagi dengan tanggal hari ini
+        dayDivisor = Math.max(1, now.getDate());
+      } else {
+        // Bulan depan (siklus gajian akhir bulan): pakai hari aktif yang sudah ada
+        dayDivisor = Math.max(1, distinctDays);
+      }
+    }
+    const dailyAvg = Math.round(totalOut / Math.max(1, dayDivisor));
+
+    return { todayTotal, todayCount: todayTx.length, dailyAvg, dayDivisor };
   }
 
   function buildExpensePresets(data) {
@@ -100,7 +120,7 @@
         <div class="today-card">
           <div class="today-label">📈 Rata-Rata / Hari</div>
           <div class="today-val">${F.formatCompact(todayStats.dailyAvg)}</div>
-          <div class="today-sub">dari ${todayStats.activeDays || 1} hari aktif</div>
+          <div class="today-sub">basis ${todayStats.dayDivisor} hari</div>
         </div>
       </section>
 
