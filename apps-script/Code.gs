@@ -102,6 +102,9 @@ function doPost(e) {
       case 'deleteTransaction':
         result = handleDeleteTransaction_(payload);
         break;
+      case 'updateTransaction':
+        result = handleUpdateTransaction_(payload);
+        break;
       default:
         throw new Error('Action POST tidak dikenal: ' + action);
     }
@@ -156,7 +159,7 @@ function jsonResponse_(obj) {
 function handlePing_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   return {
-    version: 'v2-fast',
+    version: 'v3-full',
     spreadsheetName: ss.getName(),
     timezone: ss.getSpreadsheetTimeZone(),
     months: getAvailableMonthSheets_(ss),
@@ -647,6 +650,78 @@ function handleDeleteTransaction_(payload) {
     scope: scope,
     type: type,
     sheet: sheet.getName()
+  };
+}
+
+function handleUpdateTransaction_(payload) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const scope = String(payload.scope || 'monthly').trim();
+  const type = String(payload.type || '').trim();
+  const row = parseInt(payload.row, 10);
+
+  if (isNaN(row) || row < CONFIG.DATA_START_ROW || row > CONFIG.DATA_MAX_ROW) {
+    throw new Error('Nomor baris tidak valid: ' + payload.row);
+  }
+
+  const dateObj = parseDateInput_(payload.date);
+
+  if (scope === 'savings') {
+    const sheet = ss.getSheetByName(CONFIG.SAVINGS_SHEET_NAME);
+    if (!sheet) throw new Error('Sheet tabungan tidak ditemukan.');
+    const wallet = requireString_(payload.wallet, 'Rekening Tabungan');
+    if (type === 'income') {
+      const amount = parseNonZeroAmount_(payload.amount, 'Jumlah');
+      sheet.getRange(row, 7, 1, 5).setValues([[
+        dateObj, amount, String(payload.category || '').trim(), wallet, String(payload.notes || '').trim()
+      ]]);
+    } else if (type === 'expense') {
+      const amount = parsePositiveAmount_(payload.amount, 'Jumlah');
+      sheet.getRange(row, 14, 1, 7).setValues([[
+        dateObj, amount,
+        requireString_(payload.category || 'Darurat', 'Kategori'),
+        requireString_(payload.classification || 'Kebutuhan', 'Klasifikasi'),
+        wallet,
+        requireString_(payload.owner || 'Bersama', 'Peruntukan'),
+        String(payload.notes || '').trim()
+      ]]);
+    } else {
+      throw new Error('Tipe transaksi tidak valid.');
+    }
+    return { updatedRow: row, scope: scope, type: type, serverTime: new Date().toISOString() };
+  }
+
+  const sheet = getTargetMonthSheet_(ss, payload.sheet);
+  if (type === 'expense') {
+    const amount = parsePositiveAmount_(payload.amount, 'Jumlah pengeluaran');
+    sheet.getRange(row, 15, 1, 7).setValues([[
+      dateObj,
+      amount,
+      requireString_(payload.category, 'Kategori'),
+      requireString_(payload.classification || 'Kebutuhan', 'Klasifikasi'),
+      requireString_(payload.owner || 'Bersama', 'Peruntukan'),
+      requireString_(payload.wallet, 'Rek Debit'),
+      String(payload.notes || '').trim()
+    ]]);
+  } else if (type === 'income') {
+    const amount = parseNonZeroAmount_(payload.amount, 'Jumlah pemasukan');
+    sheet.getRange(row, 7, 1, 6).setValues([[
+      dateObj,
+      amount,
+      requireString_(payload.category, 'Kategori'),
+      String(payload.owner || '').trim(),
+      String(payload.notes || payload.details || '').trim(),
+      requireString_(payload.wallet, 'Rek Kredit')
+    ]]);
+  } else {
+    throw new Error('Tipe transaksi tidak valid.');
+  }
+
+  return {
+    updatedRow: row,
+    scope: scope,
+    type: type,
+    sheet: sheet.getName(),
+    serverTime: new Date().toISOString()
   };
 }
 

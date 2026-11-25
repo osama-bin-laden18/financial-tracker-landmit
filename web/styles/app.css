@@ -1114,3 +1114,180 @@ html, body {
   border-radius: 999px;
   background: var(--primary);
 }
+
+/* ==========================================================================
+   V3 DAILY PACK (PRIVACY, TODAY CARD, REKON TAP, PRESETS, INLINE CALC, EDIT)
+   ========================================================================== */
+
+.hero-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.privacy-btn {
+  border: none;
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.privacy-btn:active { opacity: 0.75; }
+
+.today-strip {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.today-card {
+  background: var(--surface);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  box-shadow: var(--shadow);
+  border: 0.5px solid var(--border);
+}
+
+.today-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.today-val {
+  font-size: 16px;
+  font-weight: 800;
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+
+.today-sub {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+
+.wallet-item.tappable {
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.15s ease;
+  text-align: left;
+  width: 100%;
+  font-family: inherit;
+}
+
+.wallet-item.tappable:active {
+  transform: scale(0.97);
+  border-color: var(--primary);
+}
+
+.wallet-top-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.wallet-rekon-hint {
+  font-size: 10px;
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.preset-strip {
+  display: flex;
+  gap: 7px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 4px;
+  margin-bottom: 12px;
+}
+
+.preset-pill {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 6px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.preset-pill:active {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.calc-preview {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--primary);
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.quick-chip.op {
+  background: var(--primary-soft);
+  color: var(--primary);
+  min-width: 34px;
+}
+
+.submit-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.submit-row .primary-btn,
+.submit-row .secondary-btn {
+  margin-top: 0;
+}
+
+.tx-left.editable {
+  cursor: pointer;
+}
+
+.edit-btn {
+  border: none;
+  background: var(--primary-soft);
+  color: var(--primary);
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.del-btn:disabled,
+.edit-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rekon-diff-box {
+  border-radius: var(--radius-md);
+  padding: 14px;
+  margin-top: 12px;
+  text-align: center;
+}
+
+.rekon-diff-box.ok { background: var(--green-soft); color: var(--green); }
+.rekon-diff-box.minus { background: var(--red-soft); color: var(--red); }
+.rekon-diff-box.plus { background: var(--orange-soft); color: var(--orange); }

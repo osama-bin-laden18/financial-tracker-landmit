@@ -10,7 +10,8 @@
     defaultOwner: 'Olan',
     demoMode: true,
     activeMonth: '',
-    theme: 'auto'
+    theme: 'auto',
+    privacyMode: false
   };
 
   function getSettings() {
@@ -455,6 +456,63 @@
         return { deletedRow: payload.row };
       }
       return livePost('deleteTransaction', payload);
+    },
+
+    async updateTransaction(payload) {
+      const cfg = getSettings();
+      if (cfg.demoMode) {
+        if (payload.scope === 'savings') {
+          const s = getDemo().savings;
+          const tx = s.transactions.find(t => t.row === payload.row && t.type === payload.type);
+          if (tx) {
+            const oldAmt = tx.amount;
+            const oldW = s.wallets.find(x => x.name === tx.wallet);
+            const newW = s.wallets.find(x => x.name === payload.wallet);
+            const newAmt = Number(payload.amount);
+            if (tx.type === 'income') {
+              s.summary.totalPemasukan += (newAmt - oldAmt);
+              if (oldW) oldW.balance -= oldAmt;
+              if (newW) newW.balance += newAmt;
+            } else {
+              s.summary.totalPengeluaran += (newAmt - oldAmt);
+              if (oldW) oldW.balance += oldAmt;
+              if (newW) newW.balance -= newAmt;
+            }
+            Object.assign(tx, {
+              date: payload.date, amount: newAmt, category: payload.category,
+              classification: payload.classification || '', owner: payload.owner || '',
+              wallet: payload.wallet, notes: payload.notes || ''
+            });
+            s.summary.sisaUang = s.summary.totalPemasukan - s.summary.totalPengeluaran;
+          }
+          return { updatedRow: payload.row };
+        }
+        const d = getDemo().monthly;
+        const tx = d.transactions.find(t => t.row === payload.row && t.type === payload.type);
+        if (tx) {
+          const oldAmt = tx.amount;
+          const oldW = d.wallets.find(x => x.name === tx.wallet);
+          const newW = d.wallets.find(x => x.name === payload.wallet);
+          const newAmt = Number(payload.amount);
+          if (tx.type === 'income') {
+            d.summary.totalPemasukan += (newAmt - oldAmt);
+            if (oldW) oldW.balance -= oldAmt;
+            if (newW) newW.balance += newAmt;
+          } else {
+            d.summary.totalPengeluaran += (newAmt - oldAmt);
+            if (oldW) oldW.balance += oldAmt;
+            if (newW) newW.balance -= newAmt;
+          }
+          Object.assign(tx, {
+            date: payload.date, amount: newAmt, category: payload.category,
+            classification: payload.classification || '', owner: payload.owner || '',
+            wallet: payload.wallet, notes: payload.notes || ''
+          });
+          recalcDemoMonthly(d);
+        }
+        return { updatedRow: payload.row };
+      }
+      return livePost('updateTransaction', payload);
     }
   };
 

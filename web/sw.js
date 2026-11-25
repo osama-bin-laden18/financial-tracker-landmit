@@ -1,13 +1,13 @@
-const CACHE_NAME = 'landmit-budget-v4';
+const CACHE_NAME = 'landmit-budget-v5';
 const ASSETS = [
   './',
   './index.html',
   './manifest.json',
-  './styles/app.css?v=3',
-  './js/formatters.js?v=3',
-  './js/api.js?v=3',
-  './js/components.js?v=3',
-  './js/app.js?v=3',
+  './styles/app.css?v=4',
+  './js/formatters.js?v=4',
+  './js/api.js?v=4',
+  './js/components.js?v=4',
+  './js/app.js?v=4',
   './icons/icon-180.png',
   './icons/icon-192.png',
   './icons/icon-512.png'

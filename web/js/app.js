@@ -5,6 +5,10 @@
   const Api = global.Api;
   const C = global.Components;
 
+  let lastAutoDate = F.todayISO();
+  let lastSyncAt = 0;
+  const reqSeq = { monthly: 0, savings: 0, compare: 0 };
+
   const state = {
     tab: 'dashboard', // 'dashboard' | 'compare' | 'input' | 'history' | 'savings'
     monthly: null,
@@ -13,7 +17,8 @@
     form: {
       mode: 'expense',
       amount: 0,
-      date: F.todayISO(),
+      amountExpr: '',
+      date: lastAutoDate,
       category: 'Pangan',
       incomeCategory: 'Gaji',
       classification: 'Kebutuhan',
@@ -35,7 +40,7 @@
     compareUi: {
       monthA: '',
       monthB: '',
-      includeSavings: true, // default ON sesuai preferensi user
+      includeSavings: true,
       trendMetric: 'TOTAL',
       sort: 'max'
     }
@@ -48,6 +53,7 @@
   const demoBannerEl = document.getElementById('demoBanner');
   const themeToggleBtn = document.getElementById('themeToggleBtn');
   const themeToggleIcon = document.getElementById('themeToggleIcon');
+  const themeColorMeta = document.getElementById('themeColorMeta');
   const refreshBtn = document.getElementById('refreshBtn');
   const settingsBtn = document.getElementById('settingsBtn');
   const openSetupFromBanner = document.getElementById('openSetupFromBanner');
@@ -86,6 +92,10 @@
     }
     if (themeToggleBtn) {
       themeToggleBtn.title = dark ? 'Ganti ke Mode Light' : 'Ganti ke Mode Dark';
+    }
+    // Patch 4: Sinkronkan warna status bar / Dynamic Island iOS
+    if (themeColorMeta) {
+      themeColorMeta.setAttribute('content', dark ? '#000000' : '#F2F2F7');
     }
   }
 
@@ -163,6 +173,7 @@
 
     if (state.tab === 'dashboard') {
       mainEl.innerHTML = C.renderDashboard(state.monthly);
+      bindDashboardEvents();
     } else if (state.tab === 'input') {
       mainEl.innerHTML = C.renderInputForm(state.monthly, state.form);
       bindInputFormEvents();
@@ -173,8 +184,24 @@
   }
 
   // ==========================================================================
-  // OPTIMISTIC LOCAL STATE UPDATES (INSTANT UI FEEDBACK)
+  // OPTIMISTIC LOCAL STATE UPDATES + TRANSFER PAIR HELPER
   // ==========================================================================
+
+  function findTransferPartner(transactions, tx) {
+    if (!tx || tx.type !== 'income' || tx.category !== 'Transfer') return null;
+    const candidates = (transactions || []).filter((other) =>
+      other.type === 'income' &&
+      other.category === 'Transfer' &&
+      other.row !== tx.row &&
+      !other.pending &&
+      other.date === tx.date &&
+      Number(other.amount) === -Number(tx.amount)
+    );
+    if (!candidates.length) return null;
+    // Prioritaskan baris yang tepat bersebelahan (row ± 1)
+    candidates.sort((a, b) => Math.abs(a.row - tx.row) - Math.abs(b.row - tx.row));
+    return candidates[0];
+  }
 
   function recalcMonthlySummary(d) {
     d.summary.sisaUang = d.summary.totalPemasukan - d.summary.totalPengeluaran;
@@ -183,6 +210,12 @@
     if (d.categorySummary) {
       d.categorySummary.forEach((c) => {
         c.percent = d.summary.totalPengeluaran > 0 ? c.total / d.summary.totalPengeluaran : 0;
+      });
+    }
+    // Patch 4: Hitung ulang persen Kebutuhan / Keinginan saat optimistic update
+    if (d.classificationSummary) {
+      d.classificationSummary.forEach((cl) => {
+        cl.percent = d.summary.totalPengeluaran > 0 ? cl.total / d.summary.totalPengeluaran : 0;
       });
     }
   }
@@ -208,6 +241,7 @@
     d.transactions.unshift({
       id: 'out-' + tempRow,
       row: tempRow,
+      pending: true,
       type: 'expense',
       date: payload.date,
       amount: amt,
@@ -232,6 +266,7 @@
     d.transactions.unshift({
       id: 'in-' + tempRow,
       row: tempRow,
+      pending: true,
       type: 'income',
       date: payload.date,
       amount: amt,
@@ -256,15 +291,15 @@
     if (wTo) wTo.balance += amt;
 
     d.transactions.unshift(
-      { id: 'in-' + (tempRow + 1), row: tempRow + 1, type: 'income', date: payload.date, amount: amt, category: 'Transfer', owner: '', wallet: payload.toWallet, notes: payload.notes, classification: '' },
-      { id: 'in-' + tempRow, row: tempRow, type: 'income', date: payload.date, amount: -amt, category: 'Transfer', owner: '', wallet: payload.fromWallet, notes: payload.notes, classification: '' }
+      { id: 'in-' + (tempRow + 1), row: tempRow + 1, pending: true, type: 'income', date: payload.date, amount: amt, category: 'Transfer', owner: '', wallet: payload.toWallet, notes: payload.notes, classification: '' },
+      { id: 'in-' + tempRow, row: tempRow, pending: true, type: 'income', date: payload.date, amount: -amt, category: 'Transfer', owner: '', wallet: payload.fromWallet, notes: payload.notes, classification: '' }
     );
 
     if (fee > 0) {
       d.summary.totalPengeluaran += fee;
       if (wFrom) wFrom.balance -= fee;
       d.transactions.unshift({
-        id: 'out-' + (tempRow + 500), row: tempRow + 500, type: 'expense',
+        id: 'out-' + (tempRow + 500), row: tempRow + 500, pending: true, type: 'expense',
         date: payload.date, amount: fee, category: 'Lain-lain',
         classification: 'Kebutuhan', owner: payload.owner || 'Bersama',
         wallet: payload.fromWallet, notes: 'admin tf'
@@ -302,10 +337,70 @@
           if (w) w.balance += tx.amount;
           const c = (d.categorySummary || []).find((x) => x.category === tx.category);
           if (c) c.total = Math.max(0, c.total - tx.amount);
+          const o = (d.ownerSummary || []).find((x) => x.name === tx.owner);
+          if (o) o.total = Math.max(0, o.total - tx.amount);
+          const cl = (d.classificationSummary || []).find((x) => x.name === tx.classification);
+          if (cl) cl.total = Math.max(0, cl.total - tx.amount);
         }
         recalcMonthlySummary(d);
         persistMonthlyCache(d);
       }
+    }
+  }
+
+  function applyOptimisticEdit(scope, tx, updated) {
+    const newAmt = Number(updated.amount) || 0;
+    const oldAmt = Number(tx.amount) || 0;
+    if (scope === 'savings' && state.savings) {
+      const s = state.savings;
+      const oldW = (s.wallets || []).find((x) => x.name === tx.wallet);
+      const newW = (s.wallets || []).find((x) => x.name === updated.wallet);
+      if (tx.type === 'income') {
+        s.summary.totalPemasukan += (newAmt - oldAmt);
+        if (oldW) oldW.balance -= oldAmt;
+        if (newW) newW.balance += newAmt;
+      } else {
+        s.summary.totalPengeluaran += (newAmt - oldAmt);
+        if (oldW) oldW.balance += oldAmt;
+        if (newW) newW.balance -= newAmt;
+      }
+      Object.assign(tx, updated, { amount: newAmt });
+      s.summary.sisaUang = s.summary.totalPemasukan - s.summary.totalPengeluaran;
+      Api.saveCache('savings', s);
+      return;
+    }
+    if (scope === 'monthly' && state.monthly) {
+      const d = state.monthly;
+      const oldW = (d.wallets || []).find((x) => x.name === tx.wallet);
+      const newW = (d.wallets || []).find((x) => x.name === updated.wallet);
+      if (tx.type === 'income') {
+        d.summary.totalPemasukan += (newAmt - oldAmt);
+        if (oldW) oldW.balance -= oldAmt;
+        if (newW) newW.balance += newAmt;
+      } else {
+        d.summary.totalPengeluaran += (newAmt - oldAmt);
+        if (oldW) oldW.balance += oldAmt;
+        if (newW) newW.balance -= newAmt;
+
+        const oldC = (d.categorySummary || []).find((x) => x.category === tx.category);
+        if (oldC) oldC.total = Math.max(0, oldC.total - oldAmt);
+        const newC = (d.categorySummary || []).find((x) => x.category === updated.category);
+        if (newC) newC.total += newAmt;
+        else d.categorySummary.push({ category: updated.category, total: newAmt, percent: 0 });
+
+        const oldO = (d.ownerSummary || []).find((x) => x.name === tx.owner);
+        if (oldO) oldO.total = Math.max(0, oldO.total - oldAmt);
+        const newO = (d.ownerSummary || []).find((x) => x.name === updated.owner);
+        if (newO) newO.total += newAmt;
+
+        const oldCl = (d.classificationSummary || []).find((x) => x.name === tx.classification);
+        if (oldCl) oldCl.total = Math.max(0, oldCl.total - oldAmt);
+        const newCl = (d.classificationSummary || []).find((x) => x.name === updated.classification);
+        if (newCl) newCl.total += newAmt;
+      }
+      Object.assign(tx, updated, { amount: newAmt });
+      recalcMonthlySummary(d);
+      persistMonthlyCache(d);
     }
   }
 
@@ -317,10 +412,11 @@
   }
 
   // ==========================================================================
-  // DATA LOADERS (INSTANT CACHE FIRST + BACKGROUND SYNC)
+  // DATA LOADERS (INSTANT CACHE + RACE-CONDITION GUARD)
   // ==========================================================================
 
   async function loadMonthly(sheetName, silent) {
+    const mySeq = ++reqSeq.monthly;
     const cfg = Api.getSettings();
     if (!silent) {
       refreshBtn.classList.add('spinning');
@@ -339,7 +435,10 @@
 
     try {
       const data = await Api.getBootstrap(sheetName);
+      // Patch 3: Abaikan respons lama jika user sudah berpindah ke bulan lain
+      if (mySeq !== reqSeq.monthly) return;
       state.monthly = data;
+      lastSyncAt = Date.now();
       Api.saveSettings({ activeMonth: data.activeMonth });
       syncFormDefaults();
       renderHeader();
@@ -347,6 +446,7 @@
         renderActiveTab();
       }
     } catch (err) {
+      if (mySeq !== reqSeq.monthly) return;
       if (!silent) showToast(err.message || 'Gagal memuat data', 'error');
       if (!state.monthly) {
         mainEl.innerHTML = `
@@ -360,11 +460,14 @@
         if (b) b.addEventListener('click', openSettingsModal);
       }
     } finally {
-      refreshBtn.classList.remove('spinning');
+      if (mySeq === reqSeq.monthly) {
+        refreshBtn.classList.remove('spinning');
+      }
     }
   }
 
   async function loadSavings(silent) {
+    const mySeq = ++reqSeq.savings;
     const cfg = Api.getSettings();
     if (!silent) {
       refreshBtn.classList.add('spinning');
@@ -377,16 +480,20 @@
       }
     }
     try {
-      state.savings = await Api.getSavings();
+      const data = await Api.getSavings();
+      if (mySeq !== reqSeq.savings) return;
+      state.savings = data;
       if (state.tab === 'savings') renderActiveTab();
     } catch (err) {
+      if (mySeq !== reqSeq.savings) return;
       if (!silent) showToast(err.message || 'Gagal memuat tabungan', 'error');
     } finally {
-      refreshBtn.classList.remove('spinning');
+      if (mySeq === reqSeq.savings) refreshBtn.classList.remove('spinning');
     }
   }
 
   async function loadCompare(forceRefresh, silent) {
+    const mySeq = ++reqSeq.compare;
     const cfg = Api.getSettings();
     if (!silent) {
       refreshBtn.classList.add('spinning');
@@ -400,27 +507,51 @@
       }
     }
     try {
-      state.compare = await Api.getCompare(forceRefresh);
+      const data = await Api.getCompare(forceRefresh);
+      if (mySeq !== reqSeq.compare) return;
+      state.compare = data;
       syncCompareDefaults();
       if (state.tab === 'compare') renderActiveTab();
     } catch (err) {
+      if (mySeq !== reqSeq.compare) return;
       if (!silent) {
         const msg = (err.message || '').includes('tidak dikenal: compare')
-          ? 'Update Code.gs v2 di Apps Script dulu untuk mengaktifkan grafik Perbandingan.'
+          ? 'Update Code.gs v2/v3 di Apps Script dulu untuk mengaktifkan grafik Perbandingan.'
           : (err.message || 'Gagal memuat perbandingan');
         showToast(msg, 'error');
         if (state.tab === 'compare' && !state.compare) {
-          mainEl.innerHTML = `<div class="card empty-state"><p style="color:var(--red);font-weight:700;margin-top:0;">Perlu Update Code.gs v2</p><p style="font-size:13px;">${F.escapeHtml(msg)}</p></div>`;
+          mainEl.innerHTML = `<div class="card empty-state"><p style="color:var(--red);font-weight:700;margin-top:0;">Perlu Update Code.gs</p><p style="font-size:13px;">${F.escapeHtml(msg)}</p></div>`;
         }
       }
     } finally {
-      refreshBtn.classList.remove('spinning');
+      if (mySeq === reqSeq.compare) refreshBtn.classList.remove('spinning');
     }
   }
 
   // ==========================================================================
   // EVENT BINDINGS PER TAB
   // ==========================================================================
+
+  function bindDashboardEvents() {
+    const privBtn = document.getElementById('privacyToggleBtn');
+    if (privBtn) {
+      privBtn.addEventListener('click', () => {
+        const next = !F.isPrivacyMode();
+        F.setPrivacyMode(next);
+        Api.saveSettings({ privacyMode: next });
+        renderActiveTab();
+        showToast(next ? 'Saldo disamarkan 🙈' : 'Saldo ditampilkan 👁️');
+      });
+    }
+
+    mainEl.querySelectorAll('[data-rekon-wallet]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const wName = btn.dataset.rekonWallet;
+        const bal = Number(btn.dataset.rekonBal) || 0;
+        openRekonWalletModal(wName, bal);
+      });
+    });
+  }
 
   function bindCompareEvents() {
     const selA = document.getElementById('cmpMonthA');
@@ -486,13 +617,25 @@
     if (!form) return;
 
     const amountInput = document.getElementById('amountInput');
+    const calcPreview = document.getElementById('calcPreview');
     const dateInput = document.getElementById('txDate');
     const notesInput = document.getElementById('txNotes');
     const adminFeeInput = document.getElementById('adminFeeInput');
+    const stayBtn = document.getElementById('submitStayBtn');
+
+    function syncAmountFromRaw(rawStr) {
+      const evaluated = F.evaluateAmountExpr(rawStr);
+      state.form.amount = evaluated.value;
+      state.form.amountExpr = evaluated.display || '';
+      amountInput.value = state.form.amountExpr;
+      if (calcPreview) {
+        calcPreview.textContent = '= ' + F.formatRupiah(evaluated.value, false, true);
+        calcPreview.classList.toggle('hidden', !evaluated.isExpression);
+      }
+    }
 
     amountInput.addEventListener('input', () => {
-      state.form.amount = F.parseNumberInput(amountInput.value);
-      amountInput.value = state.form.amount ? F.formatNumberInput(state.form.amount) : '';
+      syncAmountFromRaw(amountInput.value);
     });
 
     dateInput.addEventListener('change', () => {
@@ -513,6 +656,27 @@
       });
     }
 
+    // Preset 1-tap ("Sering Dipakai")
+    const presets = C.buildExpensePresets(state.monthly);
+    form.querySelectorAll('[data-preset-idx]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const p = presets[parseInt(btn.dataset.presetIdx, 10)];
+        if (!p) return;
+        const opts = state.monthly.options || {};
+        if (p.category && (opts.expenseCategories || []).includes(p.category)) state.form.category = p.category;
+        if (p.classification) state.form.classification = p.classification;
+        if (p.owner && (opts.owners || []).includes(p.owner)) state.form.owner = p.owner;
+        if (p.wallet && (opts.wallets || []).includes(p.wallet)) state.form.wallet = p.wallet;
+        state.form.notes = p.label;
+        if (!state.form.amount && p.lastAmount) {
+          state.form.amount = p.lastAmount;
+          state.form.amountExpr = F.formatNumberInput(p.lastAmount);
+        }
+        renderActiveTab();
+        showToast(`Preset "${p.label}" diisi ✓`, 'success');
+      });
+    });
+
     form.querySelectorAll('[data-mode]').forEach((btn) => {
       btn.addEventListener('click', () => {
         state.form.mode = btn.dataset.mode;
@@ -520,11 +684,25 @@
       });
     });
 
+    form.querySelectorAll('[data-append-op]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const op = btn.dataset.appendOp;
+        const cur = (state.form.amountExpr || '').trim();
+        if (!cur) return;
+        const nextRaw = cur.replace(/[+\-]\s*$/, '') + op;
+        syncAmountFromRaw(nextRaw);
+        amountInput.focus();
+      });
+    });
+
     form.querySelectorAll('[data-add-amt]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const delta = parseInt(btn.dataset.addAmt, 10);
-        state.form.amount = delta === 0 ? 0 : (state.form.amount + delta);
-        amountInput.value = state.form.amount ? F.formatNumberInput(state.form.amount) : '';
+        if (delta === 0) {
+          syncAmountFromRaw('');
+        } else {
+          syncAmountFromRaw(String((state.form.amount || 0) + delta));
+        }
       });
     });
 
@@ -542,8 +720,7 @@
       });
     });
 
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
+    async function handleSubmitTx(stayOnInput) {
       if (state.form.submitting) return;
       if (!state.form.amount || state.form.amount <= 0) {
         showToast('Isi nominal terlebih dahulu.', 'error');
@@ -599,15 +776,18 @@
         applyOptimisticTransfer(payload, tempRow);
       }
 
-      // Langsung pindah ke Beranda secara instan (Optimistic UI)
+      // Reset form nominal & notes
       state.form.amount = 0;
+      state.form.amountExpr = '';
       state.form.notes = '';
       state.form.adminFee = 0;
-      state.tab = 'dashboard';
+      if (!stayOnInput) {
+        state.tab = 'dashboard';
+      }
       renderHeader();
       renderActiveTab();
       refreshBtn.classList.add('spinning');
-      showToast('Menyimpan ke Google Sheets...');
+      showToast(stayOnInput ? 'Menyimpan... siap catat berikutnya!' : 'Menyimpan ke Google Sheets...');
 
       try {
         let res;
@@ -615,19 +795,39 @@
         else if (mode === 'income') res = await Api.addIncome(payload);
         else res = await Api.addTransfer(payload);
 
-        // Jika server versi v1 mengembalikan bootstrap, gunakan langsung; jika v2 fast, sinkron halus di background
+        // Patch 1: Segera ganti tempRow -> row asli dari Google Sheets & buka kunci pending
         if (res && res.bootstrap) {
           state.monthly = res.bootstrap;
           persistMonthlyCache(state.monthly);
-          renderActiveTab();
+          if (state.tab !== 'input') renderActiveTab();
         } else {
-          // Update row sementara & refresh background agar 100% sinkron dengan rumus Google Sheets
+          if (state.monthly && state.monthly.transactions) {
+            if (mode === 'transfer' && res && Array.isArray(res.rows)) {
+              const tOut = state.monthly.transactions.find((t) => t.id === 'in-' + tempRow);
+              const tIn = state.monthly.transactions.find((t) => t.id === 'in-' + (tempRow + 1));
+              if (tOut) { tOut.row = res.rows[0]; tOut.id = 'in-' + res.rows[0]; tOut.pending = false; }
+              if (tIn) { tIn.row = res.rows[1]; tIn.id = 'in-' + res.rows[1]; tIn.pending = false; }
+              if (res.feeRow) {
+                const tFee = state.monthly.transactions.find((t) => t.id === 'out-' + (tempRow + 500));
+                if (tFee) { tFee.row = res.feeRow; tFee.id = 'out-' + res.feeRow; tFee.pending = false; }
+              }
+            } else if (res && res.row) {
+              const prefix = mode === 'expense' ? 'out-' : 'in-';
+              const target = state.monthly.transactions.find((t) => t.id === prefix + tempRow);
+              if (target) {
+                target.row = res.row;
+                target.id = prefix + res.row;
+                target.pending = false;
+              }
+            }
+            persistMonthlyCache(state.monthly);
+            if (state.tab === 'history') renderActiveTab();
+          }
           state.compare = null;
           loadMonthly(activeMonth, true);
         }
         showToast('Tersimpan di Google Sheets ✓', 'success');
       } catch (err) {
-        // Rollback jika gagal tersimpan ke server
         state.monthly = snapshot;
         persistMonthlyCache(snapshot);
         renderActiveTab();
@@ -635,7 +835,16 @@
       } finally {
         refreshBtn.classList.remove('spinning');
       }
+    }
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      handleSubmitTx(false);
     });
+
+    if (stayBtn) {
+      stayBtn.addEventListener('click', () => handleSubmitTx(true));
+    }
   }
 
   function bindHistoryEvents() {
@@ -672,7 +881,6 @@
         const nextChecked = rowEl.dataset.checked !== '1';
         const snapshot = clone(state.monthly);
 
-        // Optimistic toggle
         const item = (state.monthly.mandatory.items || []).find((x) => x.row === rowNum);
         if (item) {
           item.checked = nextChecked;
@@ -699,6 +907,7 @@
       });
     });
 
+    bindEditButtons();
     bindDeleteButtons();
   }
 
@@ -707,7 +916,23 @@
     if (openBtn) {
       openBtn.addEventListener('click', openSavingsModal);
     }
+    bindEditButtons();
     bindDeleteButtons();
+  }
+
+  function bindEditButtons() {
+    mainEl.querySelectorAll('[data-edit-row]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const scope = el.dataset.editScope;
+        const type = el.dataset.editType;
+        const row = parseInt(el.dataset.editRow, 10);
+        const source = scope === 'savings' ? state.savings : state.monthly;
+        if (!source) return;
+        const tx = (source.transactions || []).find((t) => t.row === row && t.type === type);
+        if (!tx || tx.pending) return;
+        openEditTxModal(tx, scope, source.options || {});
+      });
+    });
   }
 
   function bindDeleteButtons() {
@@ -718,32 +943,42 @@
         const row = parseInt(btn.dataset.deleteRow, 10);
         const label = btn.dataset.deleteLabel || 'transaksi ini';
 
-        if (!global.confirm(`Hapus "${label}" dari Google Sheets?\n(Hanya mengosongkan sel data, rumus tetap aman)`)) {
+        // Patch 5: Deteksi otomatis pasangan Transfer (2 baris) agar Selisih Rekon tetap 0
+        let partner = null;
+        if (scope === 'monthly' && state.monthly) {
+          const tx = (state.monthly.transactions || []).find((t) => t.row === row && t.type === type);
+          if (tx) partner = findTransferPartner(state.monthly.transactions, tx);
+        }
+
+        const confirmMsg = partner
+          ? `Hapus PASANGAN Transfer "${label}" sekaligus (2 baris: baris ${row} & ${partner.row}, melibatkan ${partner.wallet})?\nIni menjaga agar Selisih Rekon tetap Rp 0.`
+          : `Hapus "${label}" dari Google Sheets?\n(Hanya mengosongkan sel data, rumus tetap aman)`;
+
+        if (!global.confirm(confirmMsg)) {
           return;
         }
 
         const snapshotMonthly = state.monthly ? clone(state.monthly) : null;
         const snapshotSavings = state.savings ? clone(state.savings) : null;
 
-        // Optimistic delete
         applyOptimisticDelete(scope, type, row);
+        if (partner) applyOptimisticDelete(scope, partner.type, partner.row);
         renderActiveTab();
         refreshBtn.classList.add('spinning');
 
         try {
-          await Api.deleteTransaction({
-            scope,
-            type,
-            row,
-            sheet: state.monthly ? state.monthly.activeMonth : ''
-          });
+          const activeSheet = state.monthly ? state.monthly.activeMonth : '';
+          await Api.deleteTransaction({ scope, type, row, sheet: activeSheet });
+          if (partner) {
+            await Api.deleteTransaction({ scope, type: partner.type, row: partner.row, sheet: activeSheet });
+          }
           state.compare = null;
           if (scope === 'savings') loadSavings(true);
-          else loadMonthly(state.monthly.activeMonth, true);
-          showToast('Transaksi berhasil dihapus ✓', 'success');
+          else loadMonthly(activeSheet, true);
+          showToast(partner ? 'Pasangan Transfer (2 baris) dihapus ✓' : 'Transaksi berhasil dihapus ✓', 'success');
         } catch (err) {
-          if (snapshotMonthly) state.monthly = snapshotMonthly;
-          if (snapshotSavings) state.savings = snapshotSavings;
+          if (snapshotMonthly) { state.monthly = snapshotMonthly; persistMonthlyCache(snapshotMonthly); }
+          if (snapshotSavings) { state.savings = snapshotSavings; Api.saveCache('savings', snapshotSavings); }
           renderActiveTab();
           showToast(err.message || 'Gagal menghapus transaksi', 'error');
         } finally {
@@ -754,12 +989,151 @@
   }
 
   // ==========================================================================
-  // MODALS
+  // MODALS (SETTINGS, REKON WALLET, EDIT TX, SAVINGS)
   // ==========================================================================
 
   function closeModal() {
     modalOverlay.classList.add('hidden');
     modalSheet.innerHTML = '';
+  }
+
+  function openRekonWalletModal(walletName, bookBalance) {
+    modalSheet.innerHTML = C.renderRekonWalletModal(walletName, bookBalance);
+    modalOverlay.classList.remove('hidden');
+
+    document.getElementById('closeModalBtn').addEventListener('click', closeModal);
+    const inputEl = document.getElementById('rekonActualInput');
+    const diffArea = document.getElementById('rekonDiffArea');
+
+    function updateDiff() {
+      const raw = inputEl.value.trim();
+      if (!raw) {
+        diffArea.innerHTML = '';
+        return;
+      }
+      const isNeg = raw.startsWith('-');
+      const absNum = F.parseNumberInput(raw);
+      inputEl.value = (isNeg ? '-' : '') + (absNum ? F.formatNumberInput(absNum) : '');
+      const actual = isNeg ? -absNum : absNum;
+      const diff = actual - bookBalance;
+
+      if (diff === 0) {
+        diffArea.innerHTML = `
+          <div class="rekon-diff-box ok">
+            <div style="font-weight:800;font-size:15px;">✓ Saldo Cocok 100%!</div>
+            <div style="font-size:12px;margin-top:3px;">Tidak ada selisih pada ${F.escapeHtml(walletName)}.</div>
+          </div>
+        `;
+      } else if (diff < 0) {
+        const missing = Math.abs(diff);
+        diffArea.innerHTML = `
+          <div class="rekon-diff-box minus">
+            <div style="font-weight:800;font-size:15px;">Selisih Kurang ${F.formatRupiah(missing, false, true)}</div>
+            <div style="font-size:12px;margin-top:3px;">Kemungkinan ada pengeluaran yang belum dicatat.</div>
+          </div>
+          <button type="button" id="rekonFixBtn" class="primary-btn danger">Catat Pengeluaran Selisih (${F.formatRupiah(missing, false, true)})</button>
+        `;
+        document.getElementById('rekonFixBtn').addEventListener('click', () => {
+          state.form.mode = 'expense';
+          state.form.wallet = walletName;
+          state.form.amount = missing;
+          state.form.amountExpr = F.formatNumberInput(missing);
+          state.form.category = 'Lain-lain';
+          state.form.notes = 'rekon selisih ' + walletName;
+          closeModal();
+          state.tab = 'input';
+          renderActiveTab();
+        });
+      } else {
+        diffArea.innerHTML = `
+          <div class="rekon-diff-box plus">
+            <div style="font-weight:800;font-size:15px;">Selisih Lebih +${F.formatRupiah(diff, false, true)}</div>
+            <div style="font-size:12px;margin-top:3px;">Ada pemasukan / refund yang belum dicatat.</div>
+          </div>
+          <button type="button" id="rekonFixBtn" class="primary-btn success">Catat Pemasukan Selisih (${F.formatRupiah(diff, false, true)})</button>
+        `;
+        document.getElementById('rekonFixBtn').addEventListener('click', () => {
+          state.form.mode = 'income';
+          state.form.wallet = walletName;
+          state.form.amount = diff;
+          state.form.amountExpr = F.formatNumberInput(diff);
+          state.form.incomeCategory = 'Uang Kaget';
+          state.form.notes = 'rekon selisih ' + walletName;
+          closeModal();
+          state.tab = 'input';
+          renderActiveTab();
+        });
+      }
+    }
+
+    inputEl.addEventListener('input', updateDiff);
+  }
+
+  function openEditTxModal(tx, scope, opts) {
+    modalSheet.innerHTML = C.renderEditTxModal(tx, scope, opts);
+    modalOverlay.classList.remove('hidden');
+
+    document.getElementById('closeModalBtn').addEventListener('click', closeModal);
+    const amtEl = document.getElementById('editAmount');
+    const isNegIncome = tx.type === 'income' && Number(tx.amount) < 0;
+
+    amtEl.addEventListener('input', () => {
+      const ev = F.evaluateAmountExpr(amtEl.value);
+      amtEl.value = ev.display || '';
+    });
+
+    document.getElementById('editTxForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const ev = F.evaluateAmountExpr(amtEl.value);
+      if (!ev.value || ev.value <= 0) {
+        showToast('Nominal harus lebih dari 0.', 'error');
+        return;
+      }
+
+      const finalAmount = isNegIncome ? -ev.value : ev.value;
+      const updated = {
+        date: document.getElementById('editDate').value,
+        amount: finalAmount,
+        category: document.getElementById('editCategory').value,
+        wallet: document.getElementById('editWallet').value,
+        classification: document.getElementById('editClass') ? document.getElementById('editClass').value : (tx.classification || ''),
+        owner: document.getElementById('editOwner') ? document.getElementById('editOwner').value : (tx.owner || ''),
+        notes: document.getElementById('editNotes').value.trim()
+      };
+
+      const snapshotMonthly = state.monthly ? clone(state.monthly) : null;
+      const snapshotSavings = state.savings ? clone(state.savings) : null;
+
+      applyOptimisticEdit(scope, tx, updated);
+      closeModal();
+      renderActiveTab();
+      refreshBtn.classList.add('spinning');
+      showToast('Menyimpan perubahan...');
+
+      try {
+        const activeSheet = state.monthly ? state.monthly.activeMonth : '';
+        await Api.updateTransaction(Object.assign({
+          scope,
+          type: tx.type,
+          row: tx.row,
+          sheet: activeSheet
+        }, updated));
+        state.compare = null;
+        if (scope === 'savings') loadSavings(true);
+        else loadMonthly(activeSheet, true);
+        showToast('Transaksi diperbarui ✓', 'success');
+      } catch (err) {
+        if (snapshotMonthly) { state.monthly = snapshotMonthly; persistMonthlyCache(snapshotMonthly); }
+        if (snapshotSavings) { state.savings = snapshotSavings; Api.saveCache('savings', snapshotSavings); }
+        renderActiveTab();
+        const msg = (err.message || '').includes('updateTransaction')
+          ? 'Update Code.gs v3 di Apps Script dulu untuk mengaktifkan fitur Edit.'
+          : (err.message || 'Gagal memperbarui transaksi');
+        showToast(msg, 'error');
+      } finally {
+        refreshBtn.classList.remove('spinning');
+      }
+    });
   }
 
   function openSettingsModal() {
@@ -891,11 +1265,11 @@
       if (mode === 'income') {
         s.summary.totalPemasukan += amt;
         if (w) w.balance += amt;
-        s.transactions.unshift({ id: 'sav-in-' + tempRow, row: tempRow, type: 'income', date: payload.date, amount: amt, category: payload.category, wallet: payload.wallet, notes: payload.notes });
+        s.transactions.unshift({ id: 'sav-in-' + tempRow, row: tempRow, pending: true, type: 'income', date: payload.date, amount: amt, category: payload.category, wallet: payload.wallet, notes: payload.notes });
       } else {
         s.summary.totalPengeluaran += amt;
         if (w) w.balance -= amt;
-        s.transactions.unshift({ id: 'sav-out-' + tempRow, row: tempRow, type: 'expense', date: payload.date, amount: amt, category: payload.category, classification: payload.classification, owner: payload.owner, wallet: payload.wallet, notes: payload.notes });
+        s.transactions.unshift({ id: 'sav-out-' + tempRow, row: tempRow, pending: true, type: 'expense', date: payload.date, amount: amt, category: payload.category, classification: payload.classification, owner: payload.owner, wallet: payload.wallet, notes: payload.notes });
       }
       s.summary.sisaUang = s.summary.totalPemasukan - s.summary.totalPengeluaran;
       Api.saveCache('savings', s);
@@ -905,7 +1279,14 @@
       showToast('Menyimpan ke NEW TABUNGAN...');
 
       try {
-        await Api.addSavings(payload);
+        const res = await Api.addSavings(payload);
+        if (res && res.row && state.savings) {
+          const prefix = mode === 'income' ? 'sav-in-' : 'sav-out-';
+          const target = state.savings.transactions.find((t) => t.id === prefix + tempRow);
+          if (target) { target.row = res.row; target.id = prefix + res.row; target.pending = false; }
+          Api.saveCache('savings', state.savings);
+          if (state.tab === 'savings') renderActiveTab();
+        }
         loadSavings(true);
         showToast('Tabungan tersimpan ✓', 'success');
       } catch (err) {
@@ -920,7 +1301,7 @@
   }
 
   // ==========================================================================
-  // GLOBAL NAVIGATION & INIT
+  // GLOBAL NAVIGATION, VISIBILITY SYNC & INIT
   // ==========================================================================
 
   document.querySelectorAll('.tab-item').forEach((btn) => {
@@ -955,6 +1336,22 @@
     });
   }
 
+  // Patch 2: Auto-update tanggal saat ganti hari & silent refresh saat buka app lagi
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    const todayNow = F.todayISO();
+    if (todayNow !== lastAutoDate) {
+      if (state.form.date === lastAutoDate) {
+        state.form.date = todayNow;
+      }
+      lastAutoDate = todayNow;
+      if (state.tab === 'input') renderActiveTab();
+    }
+    if (state.monthly && state.tab !== 'input' && (Date.now() - lastSyncAt > 60000)) {
+      loadMonthly(state.monthly.activeMonth, true);
+    }
+  });
+
   settingsBtn.addEventListener('click', openSettingsModal);
   openSetupFromBanner.addEventListener('click', openSettingsModal);
   modalOverlay.addEventListener('click', (e) => {
@@ -975,6 +1372,7 @@
   }
 
   // Start app
+  F.setPrivacyMode(Boolean(Api.getSettings().privacyMode));
   applyTheme();
   renderHeader();
   loadMonthly('');

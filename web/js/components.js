@@ -7,10 +7,60 @@
   // 1. DASHBOARD & REKON
   // ==========================================================================
 
+  function computeTodayStats(data) {
+    const today = F.todayISO();
+    const expenses = (data.transactions || []).filter((t) => t.type === 'expense');
+    const todayTx = expenses.filter((t) => t.date === today);
+    const todayTotal = todayTx.reduce((s, t) => s + (Number(t.amount) || 0), 0);
+
+    // Estimasi rata-rata harian bulan ini berdasarkan jumlah hari aktif atau tanggal hari ini
+    const distinctDays = new Set(expenses.map((t) => t.date).filter(Boolean)).size;
+    const totalOut = Number((data.summary || {}).totalPengeluaran) || 0;
+    const dayDivisor = Math.max(1, distinctDays || new Date().getDate());
+    const dailyAvg = Math.round(totalOut / dayDivisor);
+
+    return { todayTotal, todayCount: todayTx.length, dailyAvg, activeDays: distinctDays };
+  }
+
+  function buildExpensePresets(data) {
+    const map = {};
+    const txs = (data.transactions || []).filter((t) => t.type === 'expense' && t.notes);
+    txs.forEach((t) => {
+      const key = t.notes.trim().toLowerCase();
+      if (!key || key === 'admin tf' || key.startsWith('admin tf (')) return;
+      if (!map[key]) {
+        map[key] = { count: 0, label: t.notes.trim(), category: t.category, classification: t.classification || 'Kebutuhan', owner: t.owner || 'Bersama', wallet: t.wallet, lastAmount: t.amount };
+      }
+      map[key].count += 1;
+    });
+
+    const learned = Object.keys(map)
+      .map((k) => map[k])
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6);
+
+    const defaults = [
+      { label: 'parkir', category: 'Lain-lain', classification: 'Kebutuhan', owner: '', wallet: '', lastAmount: 5000 },
+      { label: 'bbm agya', category: 'BBM', classification: 'Kebutuhan', owner: '', wallet: '', lastAmount: 100000 },
+      { label: 'kopi', category: 'Kopi', classification: 'Keinginan', owner: '', wallet: '', lastAmount: 35000 },
+      { label: 'makan', category: 'Pangan', classification: 'Kebutuhan', owner: '', wallet: '', lastAmount: 50000 }
+    ];
+
+    const merged = learned.slice();
+    defaults.forEach((d) => {
+      if (merged.length < 6 && !merged.some((m) => m.label.toLowerCase() === d.label)) {
+        merged.push(d);
+      }
+    });
+    return merged;
+  }
+
   function renderDashboard(data) {
     const s = data.summary;
     const spendRatio = s.totalPemasukan > 0 ? Math.min(100, Math.round((s.totalPengeluaran / s.totalPemasukan) * 100)) : 0;
     const rekonOk = Math.round(s.selisihRekon) === 0;
+    const todayStats = computeTodayStats(data);
+    const masked = F.isPrivacyMode();
 
     const topCats = (data.categorySummary || [])
       .filter((c) => c.total > 0)
@@ -19,7 +69,12 @@
 
     return `
       <section class="card hero-card">
-        <div class="hero-label">Sisa Uang • ${F.escapeHtml(data.monthLabel)} ${F.escapeHtml(data.yearLabel)}</div>
+        <div class="hero-top-row">
+          <div class="hero-label">Sisa Uang • ${F.escapeHtml(data.monthLabel)} ${F.escapeHtml(data.yearLabel)}</div>
+          <button type="button" id="privacyToggleBtn" class="privacy-btn" title="Sembunyikan/Tampilkan Saldo">
+            ${masked ? '🙈 Tampilkan' : '👁️ Samarkan'}
+          </button>
+        </div>
         <div class="hero-amount">${F.formatRupiah(s.sisaUang)}</div>
         <div class="hero-stats">
           <div class="hero-stat-box">
@@ -36,6 +91,19 @@
         </div>
       </section>
 
+      <section class="today-strip">
+        <div class="today-card">
+          <div class="today-label">📆 Pengeluaran Hari Ini</div>
+          <div class="today-val">${F.formatRupiah(todayStats.todayTotal)}</div>
+          <div class="today-sub">${todayStats.todayCount} transaksi tercatat</div>
+        </div>
+        <div class="today-card">
+          <div class="today-label">📈 Rata-Rata / Hari</div>
+          <div class="today-val">${F.formatCompact(todayStats.dailyAvg)}</div>
+          <div class="today-sub">dari ${todayStats.activeDays || 1} hari aktif</div>
+        </div>
+      </section>
+
       <section class="rekon-card ${rekonOk ? 'ok' : 'warn'}">
         <div>
           <div class="rekon-title">${rekonOk ? '✓ Rekon Malam Aman' : '⚠️ Perlu Rekon Sebelum Tidur'}</div>
@@ -47,14 +115,17 @@
       <section class="card">
         <div class="section-header">
           <h2 class="section-title">Saldo 7 Rekening</h2>
-          <span class="section-sub">Total ${F.formatRupiah(s.totalSaldoRekening)}</span>
+          <span class="section-sub">Tap rekening untuk Rekon Malam</span>
         </div>
         <div class="wallet-grid">
           ${(data.wallets || []).map((w) => `
-            <div class="wallet-item">
-              <div class="wallet-name">${F.escapeHtml(w.name)}</div>
+            <button type="button" class="wallet-item tappable" data-rekon-wallet="${F.escapeHtml(w.name)}" data-rekon-bal="${w.balance}">
+              <div class="wallet-top-line">
+                <span class="wallet-name">${F.escapeHtml(w.name)}</span>
+                <span class="wallet-rekon-hint">Rekon ›</span>
+              </div>
               <div class="wallet-bal ${w.balance < 0 ? 'neg' : 'pos'}">${F.formatRupiah(w.balance)}</div>
-            </div>
+            </button>
           `).join('')}
         </div>
       </section>
@@ -216,6 +287,9 @@
         ? 'Simpan Pemasukan ke Sheet'
         : 'Kirim Transfer (2 Baris Otomatis)';
 
+    const presets = mode === 'expense' ? buildExpensePresets(data) : [];
+    const exprEval = F.evaluateAmountExpr(formState.amountExpr || (formState.amount ? String(formState.amount) : ''));
+
     return `
       <form id="txForm" class="card" autocomplete="off">
         <div class="segmented" style="margin-bottom:14px;">
@@ -224,15 +298,29 @@
           <button type="button" class="seg-btn ${mode === 'transfer' ? 'active' : ''}" data-mode="transfer">Transfer</button>
         </div>
 
+        ${presets.length ? `
+          <div class="form-label" style="margin-bottom:6px;">⚡ Sering Dipakai (1-Tap)</div>
+          <div class="preset-strip">
+            ${presets.map((p, idx) => `
+              <button type="button" class="preset-pill" data-preset-idx="${idx}">
+                <span>${F.getCategoryIcon(p.category)}</span>
+                <span>${F.escapeHtml(p.label)}</span>
+              </button>
+            `).join('')}
+          </div>
+        ` : ''}
+
         <div class="amount-box">
-          <div class="amount-prefix">NOMINAL (RUPIAH) • SHEET ${F.escapeHtml(data.activeMonth)}</div>
-          <input id="amountInput" class="amount-input" type="text" inputmode="numeric" placeholder="0" value="${formState.amount ? F.formatNumberInput(formState.amount) : ''}" />
+          <div class="amount-prefix">NOMINAL (BISA HITUNG + / −) • SHEET ${F.escapeHtml(data.activeMonth)}</div>
+          <input id="amountInput" class="amount-input" type="text" inputmode="text" placeholder="0" value="${F.escapeHtml(exprEval.display || '')}" />
+          <div id="calcPreview" class="calc-preview ${exprEval.isExpression ? '' : 'hidden'}">= ${F.formatRupiah(exprEval.value, false, true)}</div>
           <div class="quick-amounts">
+            <button type="button" class="quick-chip op" data-append-op="+">+</button>
+            <button type="button" class="quick-chip op" data-append-op="-">−</button>
             <button type="button" class="quick-chip" data-add-amt="10000">+10rb</button>
             <button type="button" class="quick-chip" data-add-amt="25000">+25rb</button>
             <button type="button" class="quick-chip" data-add-amt="50000">+50rb</button>
             <button type="button" class="quick-chip" data-add-amt="100000">+100rb</button>
-            <button type="button" class="quick-chip" data-add-amt="500000">+500rb</button>
             <button type="button" class="quick-chip clear" data-add-amt="0">Clear</button>
           </div>
         </div>
@@ -244,9 +332,14 @@
 
         ${fieldsHtml}
 
-        <button id="submitTxBtn" type="submit" class="primary-btn ${mode === 'income' ? 'success' : ''}" ${formState.submitting ? 'disabled' : ''}>
-          ${formState.submitting ? 'Mengirim ke Google Sheets...' : submitLabel}
-        </button>
+        <div class="submit-row">
+          <button id="submitTxBtn" type="submit" class="primary-btn ${mode === 'income' ? 'success' : ''}" ${formState.submitting ? 'disabled' : ''}>
+            ${formState.submitting ? 'Mengirim ke Google Sheets...' : submitLabel}
+          </button>
+          <button id="submitStayBtn" type="button" class="secondary-btn" ${formState.submitting ? 'disabled' : ''}>
+            🔁 Simpan &amp; Catat Lagi
+          </button>
+        </div>
       </form>
     `;
   }
@@ -350,19 +443,25 @@
       : F.formatRupiah(tx.amount, true);
     const title = tx.notes || tx.category || '(Tanpa catatan)';
     const metaParts = [tx.category, tx.wallet, tx.owner].filter(Boolean);
+    const isPending = Boolean(tx.pending);
 
     return `
       <div class="tx-item">
-        <div class="tx-left">
+        <div class="tx-left ${isPending ? '' : 'editable'}" ${isPending ? '' : `data-edit-scope="${scope}" data-edit-type="${tx.type}" data-edit-row="${tx.row}"`}>
           <div class="tx-icon">${F.getCategoryIcon(tx.category)}</div>
           <div class="tx-meta">
-            <div class="tx-title">${F.escapeHtml(title)}</div>
+            <div class="tx-title">${F.escapeHtml(title)}${isPending ? ' <span style="font-size:11px;color:var(--text-tertiary);">⏳</span>' : ''}</div>
             <div class="tx-sub">${F.escapeHtml(metaParts.join(' • '))}</div>
           </div>
         </div>
         <div class="tx-right">
           <div class="tx-amount ${amtClass}">${displayAmt}</div>
-          <button type="button" class="del-btn" title="Hapus baris" data-delete-scope="${scope}" data-delete-type="${tx.type}" data-delete-row="${tx.row}" data-delete-label="${F.escapeHtml(title)}">✕</button>
+          ${isPending ? `
+            <button type="button" class="del-btn" disabled title="Menunggu konfirmasi Google Sheets...">⏳</button>
+          ` : `
+            <button type="button" class="edit-btn" title="Edit transaksi" data-edit-scope="${scope}" data-edit-type="${tx.type}" data-edit-row="${tx.row}">✏️</button>
+            <button type="button" class="del-btn" title="Hapus baris" data-delete-scope="${scope}" data-delete-type="${tx.type}" data-delete-row="${tx.row}" data-delete-label="${F.escapeHtml(title)}">✕</button>
+          `}
         </div>
       </div>
     `;
@@ -775,13 +874,104 @@
     `;
   }
 
+  function renderRekonWalletModal(walletName, bookBalance) {
+    return `
+      <div class="sheet-handle"></div>
+      <div class="section-header">
+        <h2 class="section-title" style="font-size:17px;">🌙 Rekon Malam: ${F.escapeHtml(walletName)}</h2>
+        <button type="button" class="icon-btn" id="closeModalBtn">✕</button>
+      </div>
+      <div class="delta-box" style="margin-bottom:12px;">
+        <div class="delta-label">Saldo Catatan di Google Sheets</div>
+        <div class="delta-val">${F.formatRupiah(bookBalance, false, true)}</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="rekonActualInput">Saldo Nyata di M-Banking / Dompet (Rp)</label>
+        <input id="rekonActualInput" class="ios-input" type="text" inputmode="numeric" placeholder="Ketik saldo asli Anda sekarang..." autofocus />
+      </div>
+      <div id="rekonDiffArea"></div>
+    `;
+  }
+
+  function renderEditTxModal(tx, scope, opts) {
+    const isExp = tx.type === 'expense';
+    const cats = isExp ? (opts.expenseCategories || []) : (opts.incomeCategories || []);
+    const wallets = opts.wallets || [];
+    const owners = opts.owners || ['Olan', 'Mitry', 'Bersama'];
+    const classes = opts.classifications || ['Kebutuhan', 'Keinginan'];
+    const absAmt = Math.abs(Number(tx.amount) || 0);
+    const isNegIncome = !isExp && Number(tx.amount) < 0;
+
+    return `
+      <div class="sheet-handle"></div>
+      <div class="section-header">
+        <h2 class="section-title" style="font-size:17px;">✏️ Edit ${isExp ? 'Pengeluaran' : 'Pemasukan'} (Baris ${tx.row})</h2>
+        <button type="button" class="icon-btn" id="closeModalBtn">✕</button>
+      </div>
+      <form id="editTxForm">
+        <div class="form-group">
+          <label class="form-label" for="editAmount">Nominal (Rp)${isNegIncome ? ' — nilai negatif Transfer' : ''}</label>
+          <input id="editAmount" class="ios-input" type="text" inputmode="text" value="${F.formatNumberInput(absAmt)}" required />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="editDate">Tanggal</label>
+          <input id="editDate" class="ios-input" type="date" value="${F.escapeHtml(tx.date || F.todayISO())}" required />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="editCategory">Kategori</label>
+          <select id="editCategory" class="ios-select">
+            ${cats.map((c) => `<option value="${F.escapeHtml(c)}" ${c === tx.category ? 'selected' : ''}>${F.escapeHtml(c)}</option>`).join('')}
+            ${tx.category && !cats.includes(tx.category) ? `<option value="${F.escapeHtml(tx.category)}" selected>${F.escapeHtml(tx.category)}</option>` : ''}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="editWallet">Rekening</label>
+          <select id="editWallet" class="ios-select">
+            ${wallets.map((w) => `<option value="${F.escapeHtml(w)}" ${w === tx.wallet ? 'selected' : ''}>${F.escapeHtml(w)}</option>`).join('')}
+            ${tx.wallet && !wallets.includes(tx.wallet) ? `<option value="${F.escapeHtml(tx.wallet)}" selected>${F.escapeHtml(tx.wallet)}</option>` : ''}
+          </select>
+        </div>
+        ${isExp ? `
+          <div class="form-group">
+            <label class="form-label" for="editClass">Klasifikasi</label>
+            <select id="editClass" class="ios-select">
+              ${classes.map((cl) => `<option value="${F.escapeHtml(cl)}" ${cl === tx.classification ? 'selected' : ''}>${F.escapeHtml(cl)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="editOwner">Peruntukan</label>
+            <select id="editOwner" class="ios-select">
+              ${owners.map((o) => `<option value="${F.escapeHtml(o)}" ${o === tx.owner ? 'selected' : ''}>${F.escapeHtml(o)}</option>`).join('')}
+            </select>
+          </div>
+        ` : (scope === 'monthly' ? `
+          <div class="form-group">
+            <label class="form-label" for="editOwner">Keterangan (Opsional)</label>
+            <select id="editOwner" class="ios-select">
+              <option value="">Tanpa label</option>
+              ${owners.map((o) => `<option value="${F.escapeHtml(o)}" ${o === tx.owner ? 'selected' : ''}>${F.escapeHtml(o)}</option>`).join('')}
+            </select>
+          </div>
+        ` : '')}
+        <div class="form-group">
+          <label class="form-label" for="editNotes">Catatan / Notes</label>
+          <input id="editNotes" class="ios-input" type="text" value="${F.escapeHtml(tx.notes || '')}" />
+        </div>
+        <button type="submit" id="saveEditBtn" class="primary-btn">Simpan Perubahan ke Sheet</button>
+      </form>
+    `;
+  }
+
   global.Components = {
+    buildExpensePresets,
     renderDashboard,
     renderInputForm,
     renderHistoryAndBills,
     renderSavings,
     renderCompare,
     renderSettingsModal,
-    renderSavingsModal
+    renderSavingsModal,
+    renderRekonWalletModal,
+    renderEditTxModal
   };
 })(window);
