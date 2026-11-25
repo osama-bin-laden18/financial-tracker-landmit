@@ -1308,6 +1308,7 @@
     btn.addEventListener('click', () => {
       state.tab = btn.dataset.tab;
       renderActiveTab();
+      try { global.scrollTo({ top: 0, behavior: 'instant' }); } catch (_) { global.scrollTo(0, 0); }
       if (state.tab === 'savings' && !state.savings) {
         loadSavings();
       } else if (state.tab === 'compare' && !state.compare) {
