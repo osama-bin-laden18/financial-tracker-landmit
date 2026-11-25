@@ -189,24 +189,43 @@ function handleBootstrap_(requestedSheetName) {
   const sisaUang = toNumber_(at(8, 8));                       // H8
   const totalPemasukan = toNumber_(at(10, 8));                // H10
   const totalPengeluaran = toNumber_(at(12, 8));              // H12
-  const totalSaldoRekening = toNumber_(at(13, 12));           // L13
-  const selisihRekon = toNumber_(at(14, 12));                 // L14
 
-  // Saldo 7 rekening (K6:L12 -> col 11 & 12)
-  const wallets = [];
-  for (let r = 6; r <= 12; r++) {
-    const name = String(at(r, 11) || '').trim();
-    if (name) {
-      wallets.push({ name: name, balance: toNumber_(at(r, 12)) });
+  // Baca tabel saldo rekening secara dinamis (mendukung 7, 8, 9+ rekening)
+  // Blok atas: K6:L16 (berhenti sebelum header tabel baris 17)
+  // Blok Rekap Kepemilikan: W38:X49 (berhenti sebelum blok Rekap Pengeluaran)
+  const topWalletBlock = extractWalletBlockFromGrid_(grid, 6, 2, 6, 16, 11, 12);
+  const rekapWalletBlock = extractWalletBlockFromGrid_(grid, 6, 2, 38, 49, 23, 24);
+
+  const primaryWalletBlock = (rekapWalletBlock.wallets.length > topWalletBlock.wallets.length)
+    ? rekapWalletBlock
+    : topWalletBlock;
+  const secondaryWalletBlock = (primaryWalletBlock === rekapWalletBlock)
+    ? topWalletBlock
+    : rekapWalletBlock;
+
+  const wallets = primaryWalletBlock.wallets.slice();
+  const seenWallets = {};
+  wallets.forEach(function (w) { seenWallets[w.name] = true; });
+  secondaryWalletBlock.wallets.forEach(function (w) {
+    if (!seenWallets[w.name]) {
+      wallets.push(w);
+      seenWallets[w.name] = true;
     }
-  }
+  });
+
+  const totalSaldoRekening = (primaryWalletBlock.total !== null)
+    ? primaryWalletBlock.total
+    : wallets.reduce(function (sum, w) { return sum + w.balance; }, 0);
+  const selisihRekon = (primaryWalletBlock.selisih !== null)
+    ? primaryWalletBlock.selisih
+    : (totalSaldoRekening - sisaUang);
 
   // Dropdown options dinamis dari grid
   const incomeCategories = readUniqueFromGrid_(grid, 6, 2, 18, 34, 2);   // B18:B34
   const expenseCategories = readUniqueFromGrid_(grid, 6, 2, 18, 34, 4);  // D18:D34
   const classifications = readUniqueFromGrid_(grid, 6, 2, 46, 47, 2);    // B46:B47
   const owners = readUniqueFromGrid_(grid, 6, 2, 46, 49, 4);             // D46:D49
-  const walletOptions = readUniqueFromGrid_(grid, 6, 2, 38, 44, 23);     // W38:W44
+  const walletOptions = wallets.map(function (w) { return w.name; });
 
   // Rekap pengeluaran per kategori (W18:Y34 -> col 23, 24, 25)
   const categorySummary = [];
@@ -221,26 +240,9 @@ function handleBootstrap_(requestedSheetName) {
     }
   }
 
-  // Rekap klasifikasi (W52:Y53) & peruntukan (W58:X60)
-  const classificationSummary = [];
-  for (let r = 52; r <= 53; r++) {
-    const name = String(at(r, 23) || '').trim();
-    if (name) {
-      classificationSummary.push({
-        name: name,
-        total: toNumber_(at(r, 24)),
-        percent: toNumber_(at(r, 25))
-      });
-    }
-  }
-
-  const ownerSummary = [];
-  for (let r = 58; r <= 60; r++) {
-    const name = String(at(r, 23) || '').trim();
-    if (name) {
-      ownerSummary.push({ name: name, total: toNumber_(at(r, 24)) });
-    }
-  }
+  // Rekap klasifikasi & peruntukan (dinamis di W47:Y70 agar aman jika tabel Rekap Kepemilikan bertambah baris)
+  const classificationSummary = extractClassificationSummaryFromGrid_(grid, 6, 2);
+  const ownerSummary = extractOwnerSummaryFromGrid_(grid, 6, 2);
 
   // Checklist Mandatory (B55:D70 -> col 2, 3, 4)
   const mandatory = extractMandatoryFromGrid_(grid, 6, 2);
@@ -768,6 +770,102 @@ function readUniqueFromGrid_(grid, baseRow, baseCol, startRow, endRow, col) {
   for (let r = startRow; r <= endRow; r++) {
     const v = String(grid[r - baseRow][cIdx] || '').trim();
     if (v && out.indexOf(v) === -1) out.push(v);
+  }
+  return out;
+}
+
+function extractWalletBlockFromGrid_(grid, baseRow, baseCol, startRow, endRow, nameCol, valCol) {
+  const wallets = [];
+  let total = null;
+  let selisih = null;
+  let reachedSummary = false;
+
+  for (let r = startRow; r <= endRow; r++) {
+    const rowArr = grid[r - baseRow];
+    if (!rowArr) break;
+    const rawName = String(rowArr[nameCol - baseCol] || '').trim();
+    const rawVal = rowArr[valCol - baseCol];
+    if (!rawName) continue;
+
+    if (/^total$/i.test(rawName)) {
+      total = toNumber_(rawVal);
+      reachedSummary = true;
+      continue;
+    }
+    if (/^selisih$/i.test(rawName)) {
+      selisih = toNumber_(rawVal);
+      reachedSummary = true;
+      continue;
+    }
+    if (/^(kategori|rincian|peruntukan|tanggal)$/i.test(rawName) || /^rekap\b/i.test(rawName)) {
+      break;
+    }
+    if (!reachedSummary) {
+      wallets.push({ name: rawName, balance: toNumber_(rawVal) });
+    }
+  }
+
+  return { wallets: wallets, total: total, selisih: selisih };
+}
+
+function extractClassificationSummaryFromGrid_(grid, baseRow, baseCol) {
+  const out = [];
+  const colW = 23 - baseCol;
+  const colX = 24 - baseCol;
+  const colY = 25 - baseCol;
+  let headerRow = -1;
+
+  for (let r = 47; r <= 68; r++) {
+    const rowArr = grid[r - baseRow];
+    if (!rowArr) break;
+    const wVal = String(rowArr[colW] || '').trim();
+    const yVal = String(rowArr[colY] || '').trim();
+    if (/^kategori$/i.test(wVal) && yVal === '%') {
+      headerRow = r;
+      break;
+    }
+  }
+
+  const startRow = headerRow !== -1 ? headerRow + 1 : 52;
+  const endRow = headerRow !== -1 ? Math.min(headerRow + 6, 70) : 53;
+  for (let r = startRow; r <= endRow; r++) {
+    const rowArr = grid[r - baseRow];
+    if (!rowArr) break;
+    const name = String(rowArr[colW] || '').trim();
+    if (!name || /^total$/i.test(name) || /^rekap\b/i.test(name)) break;
+    out.push({
+      name: name,
+      total: toNumber_(rowArr[colX]),
+      percent: toNumber_(rowArr[colY])
+    });
+  }
+  return out;
+}
+
+function extractOwnerSummaryFromGrid_(grid, baseRow, baseCol) {
+  const out = [];
+  const colW = 23 - baseCol;
+  const colX = 24 - baseCol;
+  let headerRow = -1;
+
+  for (let r = 47; r <= 68; r++) {
+    const rowArr = grid[r - baseRow];
+    if (!rowArr) break;
+    const wVal = String(rowArr[colW] || '').trim();
+    if (/^peruntukan$/i.test(wVal)) {
+      headerRow = r;
+      break;
+    }
+  }
+
+  const startRow = headerRow !== -1 ? headerRow + 1 : 58;
+  const endRow = headerRow !== -1 ? Math.min(headerRow + 6, 70) : 60;
+  for (let r = startRow; r <= endRow; r++) {
+    const rowArr = grid[r - baseRow];
+    if (!rowArr) break;
+    const name = String(rowArr[colW] || '').trim();
+    if (!name || /^total$/i.test(name) || /^rekap\b/i.test(name)) break;
+    out.push({ name: name, total: toNumber_(rowArr[colX]) });
   }
   return out;
 }

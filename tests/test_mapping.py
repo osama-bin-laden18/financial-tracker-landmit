@@ -155,6 +155,9 @@ def test_project_files():
     assert "CacheService.getScriptCache()" in code_gs
     assert "getRange('B6:Y70')" in code_gs
     assert "getRange('H8:X34')" in code_gs
+    assert "extractWalletBlockFromGrid_" in code_gs
+    assert "extractClassificationSummaryFromGrid_" in code_gs
+    assert "extractOwnerSummaryFromGrid_" in code_gs
 
     # Validate v3 PWA UI, 5 patches, and SW cache bump
     with open(os.path.join(PROJECT_DIR, "web/index.html"), "r", encoding="utf-8") as f:
@@ -171,7 +174,7 @@ def test_project_files():
         for marker in ("findTransferPartner", "visibilitychange", "reqSeq", "openRekonWalletModal", "openEditTxModal"):
             assert marker in app_js, f"Missing {marker} in app.js"
     with open(os.path.join(PROJECT_DIR, "web/sw.js"), "r", encoding="utf-8") as f:
-        assert "landmit-budget-v7" in f.read()
+        assert "landmit-budget-v8" in f.read()
 
     # Validate PNG magic bytes on all icons
     for sz in (180, 192, 512):

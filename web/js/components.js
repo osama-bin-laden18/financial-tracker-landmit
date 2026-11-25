@@ -127,14 +127,14 @@
       <section class="rekon-card ${rekonOk ? 'ok' : 'warn'}">
         <div>
           <div class="rekon-title">${rekonOk ? '✓ Rekon Malam Aman' : '⚠️ Perlu Rekon Sebelum Tidur'}</div>
-          <div class="rekon-sub">${rekonOk ? 'Total saldo 7 rekening cocok dengan sisa uang.' : 'Selisih antara total rekening & sisa uang.'}</div>
+          <div class="rekon-sub">${rekonOk ? `Total saldo ${(data.wallets || []).length} rekening cocok dengan sisa uang.` : 'Selisih antara total rekening & sisa uang.'}</div>
         </div>
         <div class="rekon-val">${F.formatRupiah(s.selisihRekon, true)}</div>
       </section>
 
       <section class="card">
         <div class="section-header">
-          <h2 class="section-title">Saldo 7 Rekening</h2>
+          <h2 class="section-title">Saldo ${(data.wallets || []).length} Rekening</h2>
           <span class="section-sub">Tap rekening untuk Rekon Malam</span>
         </div>
         <div class="wallet-grid">
