@@ -9,7 +9,8 @@
     token: '',
     defaultOwner: 'Olan',
     demoMode: true,
-    activeMonth: ''
+    activeMonth: '',
+    theme: 'auto'
   };
 
   function getSettings() {

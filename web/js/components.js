@@ -448,6 +448,16 @@
 
       <form id="settingsForm">
         <div class="form-group">
+          <label class="form-label">Tema Tampilan (Light / Dark)</label>
+          <div class="segmented">
+            ${[['auto', 'Auto'], ['light', '☀️ Light'], ['dark', '🌙 Dark']].map(([val, lbl]) => `
+              <button type="button" class="seg-btn ${(cfg.theme || 'auto') === val ? 'active' : ''}" data-theme-choice="${val}">${lbl}</button>
+            `).join('')}
+          </div>
+          <input type="hidden" id="setTheme" value="${F.escapeHtml(cfg.theme || 'auto')}" />
+        </div>
+
+        <div class="form-group">
           <label class="form-label">Profil iPhone Ini (Default Peruntukan)</label>
           <div class="segmented">
             ${['Olan', 'Mitry', 'Bersama'].map((o) => `

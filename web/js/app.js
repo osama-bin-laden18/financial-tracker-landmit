@@ -46,6 +46,8 @@
   const monthSelectEl = document.getElementById('monthSelect');
   const headerSubtitleEl = document.getElementById('headerSubtitle');
   const demoBannerEl = document.getElementById('demoBanner');
+  const themeToggleBtn = document.getElementById('themeToggleBtn');
+  const themeToggleIcon = document.getElementById('themeToggleIcon');
   const refreshBtn = document.getElementById('refreshBtn');
   const settingsBtn = document.getElementById('settingsBtn');
   const openSetupFromBanner = document.getElementById('openSetupFromBanner');
@@ -63,6 +65,28 @@
 
   function clone(obj) {
     return JSON.parse(JSON.stringify(obj));
+  }
+
+  function isDarkActive(themePref) {
+    if (themePref === 'dark') return true;
+    if (themePref === 'light') return false;
+    return Boolean(global.matchMedia && global.matchMedia('(prefers-color-scheme: dark)').matches);
+  }
+
+  function applyTheme(themePref) {
+    const pref = themePref || Api.getSettings().theme || 'auto';
+    if (pref === 'light' || pref === 'dark') {
+      document.documentElement.setAttribute('data-theme', pref);
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+    }
+    const dark = isDarkActive(pref);
+    if (themeToggleIcon) {
+      themeToggleIcon.textContent = dark ? '☀️' : '🌙';
+    }
+    if (themeToggleBtn) {
+      themeToggleBtn.title = dark ? 'Ganti ke Mode Light' : 'Ganti ke Mode Dark';
+    }
   }
 
   function syncFormDefaults() {
@@ -745,6 +769,17 @@
 
     document.getElementById('closeModalBtn').addEventListener('click', closeModal);
 
+    modalSheet.querySelectorAll('[data-theme-choice]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        modalSheet.querySelectorAll('[data-theme-choice]').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        const chosen = btn.dataset.themeChoice;
+        document.getElementById('setTheme').value = chosen;
+        Api.saveSettings({ theme: chosen });
+        applyTheme(chosen);
+      });
+    });
+
     modalSheet.querySelectorAll('[data-default-owner]').forEach((btn) => {
       btn.addEventListener('click', () => {
         modalSheet.querySelectorAll('[data-default-owner]').forEach((b) => b.classList.remove('active'));
@@ -910,6 +945,16 @@
     else loadMonthly(state.monthly ? state.monthly.activeMonth : '', false);
   });
 
+  if (themeToggleBtn) {
+    themeToggleBtn.addEventListener('click', () => {
+      const currentDark = isDarkActive(Api.getSettings().theme || 'auto');
+      const next = currentDark ? 'light' : 'dark';
+      Api.saveSettings({ theme: next });
+      applyTheme(next);
+      showToast(next === 'dark' ? 'Mode Dark aktif 🌙' : 'Mode Light aktif ☀️');
+    });
+  }
+
   settingsBtn.addEventListener('click', openSettingsModal);
   openSetupFromBanner.addEventListener('click', openSettingsModal);
   modalOverlay.addEventListener('click', (e) => {
@@ -930,6 +975,7 @@
   }
 
   // Start app
+  applyTheme();
   renderHeader();
   loadMonthly('');
 })(window);

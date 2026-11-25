@@ -162,7 +162,9 @@ def test_project_files():
     with open(os.path.join(PROJECT_DIR, "web/js/components.js"), "r", encoding="utf-8") as f:
         assert "renderCompare" in f.read()
     with open(os.path.join(PROJECT_DIR, "web/sw.js"), "r", encoding="utf-8") as f:
-        assert "landmit-budget-v3" in f.read()
+        assert "landmit-budget-v4" in f.read()
+    with open(os.path.join(PROJECT_DIR, "web/index.html"), "r", encoding="utf-8") as f:
+        assert 'id="themeToggleBtn"' in f.read()
 
     # Validate PNG magic bytes on all icons
     for sz in (180, 192, 512):
