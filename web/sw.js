@@ -1,13 +1,13 @@
-const CACHE_NAME = 'landmit-budget-v2';
+const CACHE_NAME = 'landmit-budget-v3';
 const ASSETS = [
   './',
   './index.html',
   './manifest.json',
-  './styles/app.css',
-  './js/formatters.js',
-  './js/api.js',
-  './js/components.js',
-  './js/app.js',
+  './styles/app.css?v=2',
+  './js/formatters.js?v=2',
+  './js/api.js?v=2',
+  './js/components.js?v=2',
+  './js/app.js?v=2',
   './icons/icon-180.png',
   './icons/icon-192.png',
   './icons/icon-512.png'
@@ -28,23 +28,23 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
+  if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
-  // Jangan cache request API ke Google Apps Script
+  // Jangan pernah cache request API Google Apps Script
   if (url.hostname.includes('script.google.com') || url.hostname.includes('googleusercontent.com')) {
     return;
   }
+
+  // Network-First: selalu ambil versi terbaru dari Netlify saat online, fallback ke cache saat offline
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      const networkFetch = fetch(event.request)
-        .then((res) => {
-          if (res && res.status === 200 && event.request.method === 'GET') {
-            const copy = res.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
-          }
-          return res;
-        })
-        .catch(() => cached);
-      return cached || networkFetch;
-    })
+    fetch(event.request)
+      .then((res) => {
+        if (res && res.status === 200) {
+          const copy = res.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        }
+        return res;
+      })
+      .catch(() => caches.match(event.request))
   );
 });
