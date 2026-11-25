@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Budgeting" />
+  <meta name="theme-color" content="#0A84FF" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)" />
+  <title>Land &amp; Mit — Budgeting Tracker</title>
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="apple-touch-icon" sizes="180x180" href="./icons/icon-180.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png" />
+  <link rel="stylesheet" href="./styles/app.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <!-- Top iOS Frosted Header -->
+    <header class="ios-header">
+      <div class="header-left">
+        <div class="brand-badge">L&amp;M</div>
+        <div>
+          <h1 id="headerTitle" class="header-title">Budgeting</h1>
+          <div id="headerSubtitle" class="header-subtitle">Menghubungkan...</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <select id="monthSelect" class="month-pill" aria-label="Pilih Bulan"></select>
+        <button id="refreshBtn" class="icon-btn" aria-label="Refresh Data" title="Sinkronkan">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+            <polyline points="21 3 21 9 15 9" />
+          </svg>
+        </button>
+        <button id="settingsBtn" class="icon-btn" aria-label="Pengaturan" title="Pengaturan">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Mode Demo Banner (hidden when Live) -->
+    <div id="demoBanner" class="demo-banner hidden">
+      <span>Mode Demo — data belum terhubung ke Google Sheets</span>
+      <button id="openSetupFromBanner" class="demo-banner-btn">Hubungkan</button>
+    </div>
+
+    <!-- Main Scrollable Content -->
+    <main id="mainContent" class="main-content">
+      <div class="loading-state">
+        <div class="spinner"></div>
+        <p>Memuat data budgeting...</p>
+      </div>
+    </main>
+
+    <!-- iOS Bottom Tab Bar -->
+    <nav class="ios-tabbar" aria-label="Navigasi Utama">
+      <button class="tab-item active" data-tab="dashboard">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="7" height="9" rx="1.5" />
+          <rect x="14" y="3" width="7" height="5" rx="1.5" />
+          <rect x="14" y="12" width="7" height="9" rx="1.5" />
+          <rect x="3" y="16" width="7" height="5" rx="1.5" />
+        </svg>
+        <span>Beranda</span>
+      </button>
+
+      <button class="tab-item tab-primary" data-tab="input">
+        <div class="tab-plus-circle">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+        </div>
+        <span>Catat</span>
+      </button>
+
+      <button class="tab-item" data-tab="history">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 11l3 3L22 4" />
+          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+        </svg>
+        <span>Riwayat</span>
+      </button>
+
+      <button class="tab-item" data-tab="savings">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M19 5c-1.5 0-2.8 1.4-3 2-3.5-1.5-11-.3-11 5 0 1.8 0 3 2 4.5V20h4v-2h3v2h4v-4c1-.5 1.7-1 2-2h2v-4h-2c0-1-.5-1.5-1-2V5z" />
+          <path d="M2 9v1c0 1.1.9 2 2 2h1" />
+        </svg>
+        <span>Tabungan</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- Settings Sheet Modal -->
+  <div id="modalOverlay" class="modal-overlay hidden" role="dialog" aria-modal="true">
+    <div id="modalSheet" class="modal-sheet"></div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="./js/formatters.js"></script>
+  <script src="./js/api.js"></script>
+  <script src="./js/components.js"></script>
+  <script src="./js/app.js"></script>
+</body>
+</html>
