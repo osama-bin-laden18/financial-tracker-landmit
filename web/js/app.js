@@ -6,10 +6,10 @@
   const C = global.Components;
 
   const state = {
-    tab: 'dashboard', // 'dashboard' | 'input' | 'history' | 'savings'
+    tab: 'dashboard', // 'dashboard' | 'compare' | 'input' | 'history' | 'savings'
     monthly: null,
     savings: null,
-    loading: false,
+    compare: null,
     form: {
       mode: 'expense',
       amount: 0,
@@ -31,6 +31,13 @@
       subTab: 'tx',
       search: '',
       filter: 'all'
+    },
+    compareUi: {
+      monthA: '',
+      monthB: '',
+      includeSavings: true, // default ON sesuai preferensi user
+      trendMetric: 'TOTAL',
+      sort: 'max'
     }
   };
 
@@ -51,7 +58,11 @@
     toastEl.textContent = msg;
     toastEl.className = 'toast ' + (type || '');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => toastEl.classList.add('hidden'), 2800);
+    toastTimer = setTimeout(() => toastEl.classList.add('hidden'), 2600);
+  }
+
+  function clone(obj) {
+    return JSON.parse(JSON.stringify(obj));
   }
 
   function syncFormDefaults() {
@@ -66,7 +77,6 @@
         state.form.incomeCategory = opts.incomeCategories[0];
       }
       if (opts.wallets.length && !opts.wallets.includes(state.form.wallet)) {
-        // Pilih wallet sesuai profil default (Olan/Mitry) jika ada
         const preferred = opts.wallets.find((w) => w.toLowerCase().includes((cfg.defaultOwner || '').toLowerCase()));
         state.form.wallet = preferred || opts.wallets[0];
       }
@@ -76,6 +86,17 @@
           state.form.toWallet = opts.wallets.find((w) => w !== state.form.fromWallet) || opts.wallets[1];
         }
       }
+    }
+  }
+
+  function syncCompareDefaults() {
+    if (!state.compare || !state.compare.months || !state.compare.months.length) return;
+    const ms = state.compare.months;
+    if (!ms.includes(state.compareUi.monthB)) {
+      state.compareUi.monthB = ms[ms.length - 1];
+    }
+    if (!ms.includes(state.compareUi.monthA)) {
+      state.compareUi.monthA = ms[Math.max(0, ms.length - 2)];
     }
   }
 
@@ -105,6 +126,12 @@
       return;
     }
 
+    if (state.tab === 'compare') {
+      mainEl.innerHTML = C.renderCompare(state.compare, state.compareUi);
+      bindCompareEvents();
+      return;
+    }
+
     if (!state.monthly) {
       mainEl.innerHTML = '<div class="loading-state"><div class="spinner"></div><p>Memuat data Google Sheets...</p></div>';
       return;
@@ -121,14 +148,163 @@
     }
   }
 
+  // ==========================================================================
+  // OPTIMISTIC LOCAL STATE UPDATES (INSTANT UI FEEDBACK)
+  // ==========================================================================
+
+  function recalcMonthlySummary(d) {
+    d.summary.sisaUang = d.summary.totalPemasukan - d.summary.totalPengeluaran;
+    d.summary.totalSaldoRekening = (d.wallets || []).reduce((s, w) => s + (Number(w.balance) || 0), 0);
+    d.summary.selisihRekon = d.summary.totalSaldoRekening - d.summary.sisaUang;
+    if (d.categorySummary) {
+      d.categorySummary.forEach((c) => {
+        c.percent = d.summary.totalPengeluaran > 0 ? c.total / d.summary.totalPengeluaran : 0;
+      });
+    }
+  }
+
+  function applyOptimisticExpense(payload, tempRow) {
+    if (!state.monthly) return;
+    const d = state.monthly;
+    const amt = Number(payload.amount) || 0;
+    d.summary.totalPengeluaran += amt;
+    const w = (d.wallets || []).find((x) => x.name === payload.wallet);
+    if (w) w.balance -= amt;
+
+    const c = (d.categorySummary || []).find((x) => x.category === payload.category);
+    if (c) c.total += amt;
+    else d.categorySummary.push({ category: payload.category, total: amt, percent: 0 });
+
+    const o = (d.ownerSummary || []).find((x) => x.name === payload.owner);
+    if (o) o.total += amt;
+
+    const cl = (d.classificationSummary || []).find((x) => x.name === payload.classification);
+    if (cl) cl.total += amt;
+
+    d.transactions.unshift({
+      id: 'out-' + tempRow,
+      row: tempRow,
+      type: 'expense',
+      date: payload.date,
+      amount: amt,
+      category: payload.category,
+      classification: payload.classification,
+      owner: payload.owner,
+      wallet: payload.wallet,
+      notes: payload.notes
+    });
+    recalcMonthlySummary(d);
+    persistMonthlyCache(d);
+  }
+
+  function applyOptimisticIncome(payload, tempRow) {
+    if (!state.monthly) return;
+    const d = state.monthly;
+    const amt = Number(payload.amount) || 0;
+    d.summary.totalPemasukan += amt;
+    const w = (d.wallets || []).find((x) => x.name === payload.wallet);
+    if (w) w.balance += amt;
+
+    d.transactions.unshift({
+      id: 'in-' + tempRow,
+      row: tempRow,
+      type: 'income',
+      date: payload.date,
+      amount: amt,
+      category: payload.category,
+      owner: payload.owner,
+      wallet: payload.wallet,
+      notes: payload.details || '',
+      classification: ''
+    });
+    recalcMonthlySummary(d);
+    persistMonthlyCache(d);
+  }
+
+  function applyOptimisticTransfer(payload, tempRow) {
+    if (!state.monthly) return;
+    const d = state.monthly;
+    const amt = Number(payload.amount) || 0;
+    const fee = Number(payload.adminFee) || 0;
+    const wFrom = (d.wallets || []).find((x) => x.name === payload.fromWallet);
+    const wTo = (d.wallets || []).find((x) => x.name === payload.toWallet);
+    if (wFrom) wFrom.balance -= amt;
+    if (wTo) wTo.balance += amt;
+
+    d.transactions.unshift(
+      { id: 'in-' + (tempRow + 1), row: tempRow + 1, type: 'income', date: payload.date, amount: amt, category: 'Transfer', owner: '', wallet: payload.toWallet, notes: payload.notes, classification: '' },
+      { id: 'in-' + tempRow, row: tempRow, type: 'income', date: payload.date, amount: -amt, category: 'Transfer', owner: '', wallet: payload.fromWallet, notes: payload.notes, classification: '' }
+    );
+
+    if (fee > 0) {
+      d.summary.totalPengeluaran += fee;
+      if (wFrom) wFrom.balance -= fee;
+      d.transactions.unshift({
+        id: 'out-' + (tempRow + 500), row: tempRow + 500, type: 'expense',
+        date: payload.date, amount: fee, category: 'Lain-lain',
+        classification: 'Kebutuhan', owner: payload.owner || 'Bersama',
+        wallet: payload.fromWallet, notes: 'admin tf'
+      });
+    }
+    recalcMonthlySummary(d);
+    persistMonthlyCache(d);
+  }
+
+  function applyOptimisticDelete(scope, type, row) {
+    if (scope === 'savings' && state.savings) {
+      const s = state.savings;
+      const idx = s.transactions.findIndex((t) => t.row === row && t.type === type);
+      if (idx >= 0) {
+        const tx = s.transactions.splice(idx, 1)[0];
+        const w = (s.wallets || []).find((x) => x.name === tx.wallet);
+        if (tx.type === 'income') { s.summary.totalPemasukan -= tx.amount; if (w) w.balance -= tx.amount; }
+        else { s.summary.totalPengeluaran -= tx.amount; if (w) w.balance += tx.amount; }
+        s.summary.sisaUang = s.summary.totalPemasukan - s.summary.totalPengeluaran;
+        Api.saveCache('savings', s);
+      }
+      return;
+    }
+    if (scope === 'monthly' && state.monthly) {
+      const d = state.monthly;
+      const idx = d.transactions.findIndex((t) => t.row === row && t.type === type);
+      if (idx >= 0) {
+        const tx = d.transactions.splice(idx, 1)[0];
+        const w = (d.wallets || []).find((x) => x.name === tx.wallet);
+        if (tx.type === 'income') {
+          d.summary.totalPemasukan -= tx.amount;
+          if (w) w.balance -= tx.amount;
+        } else {
+          d.summary.totalPengeluaran -= tx.amount;
+          if (w) w.balance += tx.amount;
+          const c = (d.categorySummary || []).find((x) => x.category === tx.category);
+          if (c) c.total = Math.max(0, c.total - tx.amount);
+        }
+        recalcMonthlySummary(d);
+        persistMonthlyCache(d);
+      }
+    }
+  }
+
+  function persistMonthlyCache(d) {
+    if (!Api.getSettings().demoMode && d && d.activeMonth) {
+      Api.saveCache('bootstrap_' + d.activeMonth, d);
+      Api.saveCache('last_bootstrap', d);
+    }
+  }
+
+  // ==========================================================================
+  // DATA LOADERS (INSTANT CACHE FIRST + BACKGROUND SYNC)
+  // ==========================================================================
+
   async function loadMonthly(sheetName, silent) {
     const cfg = Api.getSettings();
     if (!silent) {
       refreshBtn.classList.add('spinning');
-      // Tampilkan cache cepat saat live agar terasa instan di iPhone
-      if (!cfg.demoMode && !state.monthly) {
-        const cached = Api.readCache('bootstrap_' + (sheetName || cfg.activeMonth));
-        if (cached) {
+      if (!cfg.demoMode) {
+        const cached = (sheetName && Api.readCache('bootstrap_' + sheetName))
+          || (cfg.activeMonth && Api.readCache('bootstrap_' + cfg.activeMonth))
+          || Api.readCache('last_bootstrap');
+        if (cached && (!sheetName || cached.activeMonth === sheetName)) {
           state.monthly = cached;
           syncFormDefaults();
           renderHeader();
@@ -136,15 +312,18 @@
         }
       }
     }
+
     try {
       const data = await Api.getBootstrap(sheetName);
       state.monthly = data;
       Api.saveSettings({ activeMonth: data.activeMonth });
       syncFormDefaults();
       renderHeader();
-      renderActiveTab();
+      if (state.tab !== 'input') {
+        renderActiveTab();
+      }
     } catch (err) {
-      showToast(err.message || 'Gagal memuat data', 'error');
+      if (!silent) showToast(err.message || 'Gagal memuat data', 'error');
       if (!state.monthly) {
         mainEl.innerHTML = `
           <div class="card empty-state">
@@ -162,12 +341,54 @@
   }
 
   async function loadSavings(silent) {
-    if (!silent) refreshBtn.classList.add('spinning');
+    const cfg = Api.getSettings();
+    if (!silent) {
+      refreshBtn.classList.add('spinning');
+      if (!cfg.demoMode && !state.savings) {
+        const cached = Api.readCache('savings');
+        if (cached) {
+          state.savings = cached;
+          if (state.tab === 'savings') renderActiveTab();
+        }
+      }
+    }
     try {
       state.savings = await Api.getSavings();
       if (state.tab === 'savings') renderActiveTab();
     } catch (err) {
-      showToast(err.message || 'Gagal memuat tabungan', 'error');
+      if (!silent) showToast(err.message || 'Gagal memuat tabungan', 'error');
+    } finally {
+      refreshBtn.classList.remove('spinning');
+    }
+  }
+
+  async function loadCompare(forceRefresh, silent) {
+    const cfg = Api.getSettings();
+    if (!silent) {
+      refreshBtn.classList.add('spinning');
+      if (!cfg.demoMode && !state.compare) {
+        const cached = Api.readCache('compare_v2');
+        if (cached) {
+          state.compare = cached;
+          syncCompareDefaults();
+          if (state.tab === 'compare') renderActiveTab();
+        }
+      }
+    }
+    try {
+      state.compare = await Api.getCompare(forceRefresh);
+      syncCompareDefaults();
+      if (state.tab === 'compare') renderActiveTab();
+    } catch (err) {
+      if (!silent) {
+        const msg = (err.message || '').includes('tidak dikenal: compare')
+          ? 'Update Code.gs v2 di Apps Script dulu untuk mengaktifkan grafik Perbandingan.'
+          : (err.message || 'Gagal memuat perbandingan');
+        showToast(msg, 'error');
+        if (state.tab === 'compare' && !state.compare) {
+          mainEl.innerHTML = `<div class="card empty-state"><p style="color:var(--red);font-weight:700;margin-top:0;">Perlu Update Code.gs v2</p><p style="font-size:13px;">${F.escapeHtml(msg)}</p></div>`;
+        }
+      }
     } finally {
       refreshBtn.classList.remove('spinning');
     }
@@ -176,6 +397,65 @@
   // ==========================================================================
   // EVENT BINDINGS PER TAB
   // ==========================================================================
+
+  function bindCompareEvents() {
+    const selA = document.getElementById('cmpMonthA');
+    const selB = document.getElementById('cmpMonthB');
+    const swapBtn = document.getElementById('swapCompareBtn');
+    const incSav = document.getElementById('cmpIncludeSavings');
+    const trendSel = document.getElementById('cmpTrendMetric');
+
+    if (selA) {
+      selA.addEventListener('change', () => {
+        state.compareUi.monthA = selA.value;
+        renderActiveTab();
+      });
+    }
+    if (selB) {
+      selB.addEventListener('change', () => {
+        state.compareUi.monthB = selB.value;
+        renderActiveTab();
+      });
+    }
+    if (swapBtn) {
+      swapBtn.addEventListener('click', () => {
+        const tmp = state.compareUi.monthA;
+        state.compareUi.monthA = state.compareUi.monthB;
+        state.compareUi.monthB = tmp;
+        renderActiveTab();
+      });
+    }
+    if (incSav) {
+      incSav.addEventListener('change', () => {
+        state.compareUi.includeSavings = incSav.checked;
+        renderActiveTab();
+      });
+    }
+    if (trendSel) {
+      trendSel.addEventListener('change', () => {
+        state.compareUi.trendMetric = trendSel.value;
+        renderActiveTab();
+      });
+    }
+
+    mainEl.querySelectorAll('[data-cmp-sort]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.compareUi.sort = btn.dataset.cmpSort;
+        renderActiveTab();
+      });
+    });
+
+    mainEl.querySelectorAll('[data-pick-month]').forEach((g) => {
+      g.addEventListener('click', () => {
+        const picked = g.dataset.pickMonth;
+        if (picked && picked !== state.compareUi.monthB) {
+          state.compareUi.monthB = picked;
+          renderActiveTab();
+          showToast(`Bulan B diubah ke ${picked}`, 'success');
+        }
+      });
+    });
+  }
 
   function bindInputFormEvents() {
     const form = document.getElementById('txForm');
@@ -252,63 +532,84 @@
         return;
       }
 
-      state.form.submitting = true;
+      const mode = state.form.mode;
+      const activeMonth = state.monthly.activeMonth;
+      const snapshot = clone(state.monthly);
+      const tempRow = 900 + Math.floor(Math.random() * 80);
+
+      let payload;
+      if (mode === 'expense') {
+        payload = {
+          sheet: activeMonth,
+          date: state.form.date,
+          amount: state.form.amount,
+          category: state.form.category,
+          classification: state.form.classification,
+          owner: state.form.owner,
+          wallet: state.form.wallet,
+          notes: state.form.notes
+        };
+        applyOptimisticExpense(payload, tempRow);
+      } else if (mode === 'income') {
+        payload = {
+          sheet: activeMonth,
+          date: state.form.date,
+          amount: state.form.amount,
+          category: state.form.incomeCategory,
+          owner: state.form.incomeOwner,
+          details: state.form.notes,
+          wallet: state.form.wallet
+        };
+        applyOptimisticIncome(payload, tempRow);
+      } else {
+        payload = {
+          sheet: activeMonth,
+          date: state.form.date,
+          amount: state.form.amount,
+          fromWallet: state.form.fromWallet,
+          toWallet: state.form.toWallet,
+          adminFee: state.form.adminFee,
+          owner: state.form.owner,
+          notes: state.form.transferNotes || 'distribusi duit'
+        };
+        applyOptimisticTransfer(payload, tempRow);
+      }
+
+      // Langsung pindah ke Beranda secara instan (Optimistic UI)
+      state.form.amount = 0;
+      state.form.notes = '';
+      state.form.adminFee = 0;
+      state.tab = 'dashboard';
+      renderHeader();
       renderActiveTab();
+      refreshBtn.classList.add('spinning');
+      showToast('Menyimpan ke Google Sheets...');
 
       try {
         let res;
-        if (state.form.mode === 'expense') {
-          res = await Api.addExpense({
-            sheet: state.monthly.activeMonth,
-            date: state.form.date,
-            amount: state.form.amount,
-            category: state.form.category,
-            classification: state.form.classification,
-            owner: state.form.owner,
-            wallet: state.form.wallet,
-            notes: state.form.notes
-          });
-          showToast('Pengeluaran tersimpan ke Google Sheets!', 'success');
-        } else if (state.form.mode === 'income') {
-          res = await Api.addIncome({
-            sheet: state.monthly.activeMonth,
-            date: state.form.date,
-            amount: state.form.amount,
-            category: state.form.incomeCategory,
-            owner: state.form.incomeOwner,
-            details: state.form.notes,
-            wallet: state.form.wallet
-          });
-          showToast('Pemasukan tersimpan ke Google Sheets!', 'success');
-        } else {
-          res = await Api.addTransfer({
-            sheet: state.monthly.activeMonth,
-            date: state.form.date,
-            amount: state.form.amount,
-            fromWallet: state.form.fromWallet,
-            toWallet: state.form.toWallet,
-            adminFee: state.form.adminFee,
-            owner: state.form.owner,
-            notes: state.form.transferNotes || 'distribusi duit'
-          });
-          showToast('Transfer 2 baris berhasil dicatat!', 'success');
-        }
+        if (mode === 'expense') res = await Api.addExpense(payload);
+        else if (mode === 'income') res = await Api.addIncome(payload);
+        else res = await Api.addTransfer(payload);
 
+        // Jika server versi v1 mengembalikan bootstrap, gunakan langsung; jika v2 fast, sinkron halus di background
         if (res && res.bootstrap) {
           state.monthly = res.bootstrap;
+          persistMonthlyCache(state.monthly);
+          renderActiveTab();
+        } else {
+          // Update row sementara & refresh background agar 100% sinkron dengan rumus Google Sheets
+          state.compare = null;
+          loadMonthly(activeMonth, true);
         }
-        // Reset nominal & notes setelah sukses
-        state.form.amount = 0;
-        state.form.notes = '';
-        state.form.adminFee = 0;
-        state.form.submitting = false;
-        state.tab = 'dashboard';
-        renderHeader();
-        renderActiveTab();
+        showToast('Tersimpan di Google Sheets ✓', 'success');
       } catch (err) {
-        state.form.submitting = false;
-        showToast(err.message || 'Gagal menyimpan', 'error');
+        // Rollback jika gagal tersimpan ke server
+        state.monthly = snapshot;
+        persistMonthlyCache(snapshot);
         renderActiveTab();
+        showToast('Gagal simpan: ' + (err.message || 'cek koneksi'), 'error');
+      } finally {
+        refreshBtn.classList.remove('spinning');
       }
     });
   }
@@ -345,18 +646,30 @@
       rowEl.addEventListener('click', async () => {
         const rowNum = parseInt(rowEl.dataset.toggleBill, 10);
         const nextChecked = rowEl.dataset.checked !== '1';
+        const snapshot = clone(state.monthly);
+
+        // Optimistic toggle
+        const item = (state.monthly.mandatory.items || []).find((x) => x.row === rowNum);
+        if (item) {
+          item.checked = nextChecked;
+          state.monthly.mandatory.remaining = state.monthly.mandatory.items
+            .filter((x) => !x.checked)
+            .reduce((s, x) => s + x.amount, 0);
+          persistMonthlyCache(state.monthly);
+          renderActiveTab();
+        }
+
         try {
-          const res = await Api.toggleMandatory({
+          await Api.toggleMandatory({
             sheet: state.monthly.activeMonth,
             row: rowNum,
             checked: nextChecked
           });
-          if (res && res.mandatory) {
-            state.monthly.mandatory = res.mandatory;
-            renderActiveTab();
-            showToast(nextChecked ? 'Tagihan ditandai lunas ✓' : 'Centang tagihan dibatalkan', 'success');
-          }
+          showToast(nextChecked ? 'Tagihan ditandai lunas ✓' : 'Centang tagihan dibatalkan', 'success');
         } catch (err) {
+          state.monthly = snapshot;
+          persistMonthlyCache(snapshot);
+          renderActiveTab();
           showToast(err.message || 'Gagal update tagihan', 'error');
         }
       });
@@ -384,19 +697,33 @@
         if (!global.confirm(`Hapus "${label}" dari Google Sheets?\n(Hanya mengosongkan sel data, rumus tetap aman)`)) {
           return;
         }
+
+        const snapshotMonthly = state.monthly ? clone(state.monthly) : null;
+        const snapshotSavings = state.savings ? clone(state.savings) : null;
+
+        // Optimistic delete
+        applyOptimisticDelete(scope, type, row);
+        renderActiveTab();
+        refreshBtn.classList.add('spinning');
+
         try {
-          const res = await Api.deleteTransaction({
+          await Api.deleteTransaction({
             scope,
             type,
             row,
             sheet: state.monthly ? state.monthly.activeMonth : ''
           });
-          if (scope === 'savings' && res.savings) state.savings = res.savings;
-          if (scope === 'monthly' && res.bootstrap) state.monthly = res.bootstrap;
-          renderActiveTab();
-          showToast('Transaksi berhasil dihapus.', 'success');
+          state.compare = null;
+          if (scope === 'savings') loadSavings(true);
+          else loadMonthly(state.monthly.activeMonth, true);
+          showToast('Transaksi berhasil dihapus ✓', 'success');
         } catch (err) {
+          if (snapshotMonthly) state.monthly = snapshotMonthly;
+          if (snapshotSavings) state.savings = snapshotSavings;
+          renderActiveTab();
           showToast(err.message || 'Gagal menghapus transaksi', 'error');
+        } finally {
+          refreshBtn.classList.remove('spinning');
         }
       });
     });
@@ -436,7 +763,7 @@
       try {
         showToast('Mengetes koneksi...');
         const info = await Api.ping(apiUrl, token);
-        showToast(`Terhubung! Sheet: ${info.spreadsheetName} (${info.months.length} bulan)`, 'success');
+        showToast(`Terhubung (${info.version || 'v1'})! ${info.months.length} bulan ditemukan.`, 'success');
       } catch (err) {
         showToast(err.message || 'Koneksi gagal', 'error');
       }
@@ -448,6 +775,7 @@
       closeModal();
       state.monthly = null;
       state.savings = null;
+      state.compare = null;
       loadMonthly('');
       showToast('Beralih ke Mode Demo.', 'success');
     });
@@ -465,6 +793,7 @@
       closeModal();
       state.monthly = null;
       state.savings = null;
+      state.compare = null;
       loadMonthly('');
       showToast('Pengaturan tersimpan! Menghubungkan ke Google Sheets...', 'success');
     });
@@ -508,29 +837,49 @@
         showToast('Nominal tabungan wajib diisi.', 'error');
         return;
       }
-      const btn = document.getElementById('submitSavBtn');
-      btn.disabled = true;
-      btn.textContent = 'Menyimpan...';
+      const mode = modeInput.value;
+      const payload = {
+        mode,
+        date: document.getElementById('savDate').value,
+        amount: amt,
+        wallet: document.getElementById('savWallet').value,
+        category: catSelect.value,
+        classification: mode === 'expense' ? document.getElementById('savClass').value : '',
+        owner: mode === 'expense' ? document.getElementById('savOwner').value : '',
+        notes: document.getElementById('savNotes').value.trim()
+      };
+
+      const snapshot = clone(state.savings);
+      const s = state.savings;
+      const tempRow = 900 + Math.floor(Math.random() * 80);
+      const w = (s.wallets || []).find((x) => x.name === payload.wallet);
+      if (mode === 'income') {
+        s.summary.totalPemasukan += amt;
+        if (w) w.balance += amt;
+        s.transactions.unshift({ id: 'sav-in-' + tempRow, row: tempRow, type: 'income', date: payload.date, amount: amt, category: payload.category, wallet: payload.wallet, notes: payload.notes });
+      } else {
+        s.summary.totalPengeluaran += amt;
+        if (w) w.balance -= amt;
+        s.transactions.unshift({ id: 'sav-out-' + tempRow, row: tempRow, type: 'expense', date: payload.date, amount: amt, category: payload.category, classification: payload.classification, owner: payload.owner, wallet: payload.wallet, notes: payload.notes });
+      }
+      s.summary.sisaUang = s.summary.totalPemasukan - s.summary.totalPengeluaran;
+      Api.saveCache('savings', s);
+      closeModal();
+      renderActiveTab();
+      refreshBtn.classList.add('spinning');
+      showToast('Menyimpan ke NEW TABUNGAN...');
+
       try {
-        const mode = modeInput.value;
-        const res = await Api.addSavings({
-          mode,
-          date: document.getElementById('savDate').value,
-          amount: amt,
-          wallet: document.getElementById('savWallet').value,
-          category: catSelect.value,
-          classification: mode === 'expense' ? document.getElementById('savClass').value : '',
-          owner: mode === 'expense' ? document.getElementById('savOwner').value : '',
-          notes: document.getElementById('savNotes').value.trim()
-        });
-        if (res && res.savings) state.savings = res.savings;
-        closeModal();
-        renderActiveTab();
-        showToast('Transaksi tabungan tersimpan!', 'success');
+        await Api.addSavings(payload);
+        loadSavings(true);
+        showToast('Tabungan tersimpan ✓', 'success');
       } catch (err) {
-        btn.disabled = false;
-        btn.textContent = 'Simpan ke NEW TABUNGAN';
+        state.savings = snapshot;
+        Api.saveCache('savings', snapshot);
+        renderActiveTab();
         showToast(err.message || 'Gagal menyimpan tabungan', 'error');
+      } finally {
+        refreshBtn.classList.remove('spinning');
       }
     });
   }
@@ -545,6 +894,8 @@
       renderActiveTab();
       if (state.tab === 'savings' && !state.savings) {
         loadSavings();
+      } else if (state.tab === 'compare' && !state.compare) {
+        loadCompare(false);
       }
     });
   });
@@ -554,8 +905,9 @@
   });
 
   refreshBtn.addEventListener('click', () => {
-    if (state.tab === 'savings') loadSavings();
-    else loadMonthly(state.monthly ? state.monthly.activeMonth : '');
+    if (state.tab === 'savings') loadSavings(false);
+    else if (state.tab === 'compare') loadCompare(true, false);
+    else loadMonthly(state.monthly ? state.monthly.activeMonth : '', false);
   });
 
   settingsBtn.addEventListener('click', openSettingsModal);

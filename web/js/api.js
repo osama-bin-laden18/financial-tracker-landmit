@@ -2,7 +2,7 @@
   'use strict';
 
   const STORAGE_KEY = 'landmit_budget_settings_v1';
-  const CACHE_KEY = 'landmit_budget_cache_v1';
+  const CACHE_KEY = 'landmit_budget_cache_v2';
 
   const DEFAULT_SETTINGS = {
     apiUrl: 'https://script.google.com/macros/s/AKfycbz8coXPrd_eZlnI1mcux8FtTXvOWigrINrBK2kEpl1D4NYIm2xipV2mkLVhIdJ-eU5eQQ/exec',
@@ -16,7 +16,6 @@
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
       const merged = Object.assign({}, DEFAULT_SETTINGS, saved);
-      // Jika sudah ada URL & token, otomatis non-demo kecuali user sengaja pilih demo
       if (saved.apiUrl && saved.token && typeof saved.demoMode === 'undefined') {
         merged.demoMode = false;
       }
@@ -89,7 +88,6 @@
     if (!cfg.apiUrl || !cfg.token) {
       throw new Error('Web App URL dan Token belum diisi di Pengaturan.');
     }
-    // Gunakan text/plain agar browser Safari iOS tidak memicu preflight OPTIONS ke Apps Script
     const body = Object.assign({}, payload, { action, token: cfg.token });
     const res = await fetch(cfg.apiUrl, {
       method: 'POST',
@@ -111,7 +109,7 @@
   }
 
   // ==========================================================================
-  // INTERACTIVE DEMO ENGINE (meniru struktur asli sheet Land & Mit)
+  // INTERACTIVE DEMO ENGINE
   // ==========================================================================
 
   function createInitialDemoState() {
@@ -119,7 +117,7 @@
     return {
       monthly: {
         spreadsheetName: 'Budgeting Tracker (Demo)',
-        months: ['OKTOBER', 'NOVEMBER'],
+        months: ['AGUSTUS', 'SEPTEMBER', 'OKTOBER', 'NOVEMBER'],
         activeMonth: 'NOVEMBER',
         monthLabel: 'November',
         yearLabel: '2026',
@@ -223,6 +221,32 @@
           { id: 'sav-out-50', row: 50, type: 'expense', date: today, amount: 1000000, category: 'Darurat', classification: 'Kebutuhan', owner: 'Bersama', wallet: 'Cash (Mandiri)', notes: 'kehidupan (contoh)' },
           { id: 'sav-in-22', row: 22, type: 'income', date: today, amount: 9700000, category: 'Emas', owner: '', wallet: 'Emas (Mitry)', notes: 'beli emas (contoh)' }
         ]
+      },
+      compare: {
+        months: ['AGUSTUS', 'SEPTEMBER', 'OKTOBER', 'NOVEMBER'],
+        categories: [
+          'Pangan', 'Bayar Tagihan', 'BBM', 'Transportasi', 'Nongki', 'Rumah',
+          'Sandang', 'Komunikasi', 'Hadiah/Sedekah', 'Hiburan & Rekreasi',
+          'Kopi', 'Grocery', 'Lain-lain', 'Tabungan', 'Kesehatan', 'Olahraga'
+        ],
+        monthly: [
+          {
+            month: 'AGUSTUS', totalPemasukan: 24378927, totalPengeluaran: 24378927, sisaUang: 0,
+            categories: { 'Pangan': 4564387, 'Bayar Tagihan': 5824501, 'BBM': 453000, 'Transportasi': 435200, 'Nongki': 617710, 'Rumah': 766800, 'Sandang': 1588168, 'Komunikasi': 438500, 'Hadiah/Sedekah': 5251300, 'Hiburan & Rekreasi': 283000, 'Kopi': 255132, 'Grocery': 1869832, 'Lain-lain': 1195500, 'Tabungan': 721897, 'Kesehatan': 0, 'Olahraga': 114000 }
+          },
+          {
+            month: 'SEPTEMBER', totalPemasukan: 42890380, totalPengeluaran: 42890380, sisaUang: 0,
+            categories: { 'Pangan': 4148933, 'Bayar Tagihan': 5937676, 'BBM': 691000, 'Transportasi': 157000, 'Nongki': 463920, 'Rumah': 652950, 'Sandang': 130000, 'Komunikasi': 478500, 'Hadiah/Sedekah': 4848392, 'Hiburan & Rekreasi': 133000, 'Kopi': 365900, 'Grocery': 2934053, 'Lain-lain': 499247, 'Tabungan': 20339809, 'Kesehatan': 180000, 'Olahraga': 930000 }
+          },
+          {
+            month: 'OKTOBER', totalPemasukan: 26226476, totalPengeluaran: 26226476, sisaUang: 0,
+            categories: { 'Pangan': 3623130, 'Bayar Tagihan': 6129670, 'BBM': 394000, 'Transportasi': 325700, 'Nongki': 614640, 'Rumah': 276300, 'Sandang': 346000, 'Komunikasi': 626500, 'Hadiah/Sedekah': 4364450, 'Hiburan & Rekreasi': 151494, 'Kopi': 717650, 'Grocery': 1524231, 'Lain-lain': 489500, 'Tabungan': 6237985, 'Kesehatan': 380226, 'Olahraga': 25000 }
+          },
+          {
+            month: 'NOVEMBER', totalPemasukan: 22137927, totalPengeluaran: 21514118, sisaUang: 623809,
+            categories: { 'Pangan': 5020741, 'Bayar Tagihan': 4149874, 'BBM': 871000, 'Transportasi': 946000, 'Nongki': 403000, 'Rumah': 703300, 'Sandang': 0, 'Komunikasi': 499250, 'Hadiah/Sedekah': 3952000, 'Hiburan & Rekreasi': 0, 'Kopi': 784363, 'Grocery': 2205090, 'Lain-lain': 558500, 'Tabungan': 600000, 'Kesehatan': 601000, 'Olahraga': 220000 }
+          }
+        ]
       }
     };
   }
@@ -246,6 +270,7 @@
   const Api = {
     getSettings,
     saveSettings,
+    saveCache,
     readCache,
 
     async ping(customUrl, customToken) {
@@ -267,6 +292,7 @@
       }
       const data = await liveGet('bootstrap', { sheet: sheetName || cfg.activeMonth });
       saveCache('bootstrap_' + data.activeMonth, data);
+      saveCache('last_bootstrap', data);
       return data;
     },
 
@@ -277,6 +303,16 @@
       }
       const data = await liveGet('savings', {});
       saveCache('savings', data);
+      return data;
+    },
+
+    async getCompare(forceRefresh) {
+      const cfg = getSettings();
+      if (cfg.demoMode) {
+        return JSON.parse(JSON.stringify(getDemo().compare));
+      }
+      const data = await liveGet('compare', forceRefresh ? { force: '1' } : {});
+      saveCache('compare_v2', data);
       return data;
     },
 
@@ -301,11 +337,9 @@
         d.categorySummary.forEach(x => { x.percent = d.summary.totalPengeluaran ? x.total / d.summary.totalPengeluaran : 0; });
         d.categorySummary.sort((a, b) => b.total - a.total);
         recalcDemoMonthly(d);
-        return { row, bootstrap: JSON.parse(JSON.stringify(d)) };
+        return { row, sheet: d.activeMonth, type: 'expense' };
       }
-      const res = await livePost('addExpense', payload);
-      if (res.bootstrap) saveCache('bootstrap_' + res.bootstrap.activeMonth, res.bootstrap);
-      return res;
+      return livePost('addExpense', payload);
     },
 
     async addIncome(payload) {
@@ -323,11 +357,9 @@
         const w = d.wallets.find(x => x.name === payload.wallet);
         if (w) w.balance += amt;
         recalcDemoMonthly(d);
-        return { row, bootstrap: JSON.parse(JSON.stringify(d)) };
+        return { row, sheet: d.activeMonth, type: 'income' };
       }
-      const res = await livePost('addIncome', payload);
-      if (res.bootstrap) saveCache('bootstrap_' + res.bootstrap.activeMonth, res.bootstrap);
-      return res;
+      return livePost('addIncome', payload);
     },
 
     async addTransfer(payload) {
@@ -356,11 +388,9 @@
           if (wFrom) wFrom.balance -= fee;
         }
         recalcDemoMonthly(d);
-        return { rows: [base, base + 1], bootstrap: JSON.parse(JSON.stringify(d)) };
+        return { rows: [base, base + 1], sheet: d.activeMonth, type: 'transfer' };
       }
-      const res = await livePost('addTransfer', payload);
-      if (res.bootstrap) saveCache('bootstrap_' + res.bootstrap.activeMonth, res.bootstrap);
-      return res;
+      return livePost('addTransfer', payload);
     },
 
     async toggleMandatory(payload) {
@@ -370,7 +400,7 @@
         const item = d.mandatory.items.find(x => x.row === payload.row);
         if (item) item.checked = Boolean(payload.checked);
         d.mandatory.remaining = d.mandatory.items.filter(x => !x.checked).reduce((s, x) => s + x.amount, 0);
-        return { row: payload.row, checked: payload.checked, mandatory: JSON.parse(JSON.stringify(d.mandatory)) };
+        return { row: payload.row, checked: payload.checked };
       }
       return livePost('toggleMandatory', payload);
     },
@@ -392,11 +422,9 @@
           s.transactions.unshift({ id: 'sav-out-' + row, row, type: 'expense', date: payload.date, amount: amt, category: payload.category, classification: payload.classification, owner: payload.owner, wallet: payload.wallet, notes: payload.notes });
         }
         s.summary.sisaUang = s.summary.totalPemasukan - s.summary.totalPengeluaran;
-        return { row, savings: JSON.parse(JSON.stringify(s)) };
+        return { row, mode: payload.mode };
       }
-      const res = await livePost('addSavings', payload);
-      if (res.savings) saveCache('savings', res.savings);
-      return res;
+      return livePost('addSavings', payload);
     },
 
     async deleteTransaction(payload) {
@@ -412,7 +440,7 @@
             else { s.summary.totalPengeluaran -= tx.amount; if (w) w.balance += tx.amount; }
             s.summary.sisaUang = s.summary.totalPemasukan - s.summary.totalPengeluaran;
           }
-          return { savings: JSON.parse(JSON.stringify(s)) };
+          return { deletedRow: payload.row };
         }
         const d = getDemo().monthly;
         const idx = d.transactions.findIndex(t => t.row === payload.row && t.type === payload.type);
@@ -423,12 +451,9 @@
           else { d.summary.totalPengeluaran -= tx.amount; if (w) w.balance += tx.amount; }
           recalcDemoMonthly(d);
         }
-        return { bootstrap: JSON.parse(JSON.stringify(d)) };
+        return { deletedRow: payload.row };
       }
-      const res = await livePost('deleteTransaction', payload);
-      if (res.bootstrap) saveCache('bootstrap_' + res.bootstrap.activeMonth, res.bootstrap);
-      if (res.savings) saveCache('savings', res.savings);
-      return res;
+      return livePost('deleteTransaction', payload);
     }
   };
 

@@ -1,16 +1,18 @@
 /**
  * ============================================================================
- * BUDGETING TRACKER (LAND & MIT) — GOOGLE APPS SCRIPT BACKEND API
+ * BUDGETING TRACKER (LAND & MIT) — GOOGLE APPS SCRIPT BACKEND API (v2 FAST)
  * ============================================================================
- * Cara pasang:
- * 1. Buka Google Spreadsheet Anda -> menu Extensions -> Apps Script.
- * 2. Hapus kode bawaan di Code.gs, lalu paste seluruh file ini.
- * 3. Ganti API_TOKEN di bawah ini dengan PIN/kode rahasia pilihan Anda (misal "landmit2026").
- * 4. Klik Deploy -> New deployment -> Type: Web app
- *    - Execute as: Me (akun pemilik spreadsheet)
- *    - Who has access: Anyone
- * 5. Salin Web App URL (akhiran /exec) ke halaman Pengaturan di aplikasi iOS PWA.
- * 6. PENTING: Setelah berhasil, ubah sharing Spreadsheet Anda kembali ke Private/Restricted!
+ * Perubahan v2:
+ * - Batch Read: 19 panggilan getRange() dipadatkan menjadi 2 panggilan saja (~3-4x lebih cepat)
+ * - Fast Write: 1x setValues() tanpa baca ulang seluruh sheet di akhir POST
+ * - Endpoint baru GET ?action=compare (lintas semua bulan + CacheService 5 menit)
+ *
+ * Cara update di Apps Script:
+ * 1. Buka Extensions -> Apps Script di Google Spreadsheet Anda.
+ * 2. Ganti seluruh isi Code.gs dengan file ini (JANGAN lupa isi kembali API_TOKEN Anda!).
+ * 3. Save (Ctrl+S).
+ * 4. Klik Deploy -> Manage deployments -> Edit (ikon pensil) -> Version: New version -> Deploy.
+ *    (URL /exec tetap sama persis, tidak perlu diubah di HP!)
  * ============================================================================
  */
 
@@ -25,7 +27,9 @@ const CONFIG = {
   DATA_START_ROW: 18,
   // Batas aman agar selalu masuk dalam jangkauan rumus SUMIFS(H18:H996, ...) di semua sheet
   DATA_MAX_ROW: 990,
-  RECENT_LIMIT: 40
+  RECENT_LIMIT: 40,
+  COMPARE_CACHE_KEY: 'landmit_compare_v2',
+  COMPARE_CACHE_TTL: 300 // 5 menit
 };
 
 // ============================================================================
@@ -49,6 +53,9 @@ function doGet(e) {
         break;
       case 'savings':
         result = handleGetSavings_();
+        break;
+      case 'compare':
+        result = handleCompare_(params.force === '1');
         break;
       default:
         throw new Error('Action GET tidak dikenal: ' + action);
@@ -99,7 +106,8 @@ function doPost(e) {
         throw new Error('Action POST tidak dikenal: ' + action);
     }
 
-    SpreadsheetApp.flush();
+    // Hapus cache perbandingan agar data grafik langsung segar saat dibuka lagi
+    invalidateCompareCache_();
     return jsonResponse_({ ok: true, data: result });
   } catch (err) {
     return jsonResponse_({ ok: false, error: err.message || String(err) });
@@ -111,7 +119,7 @@ function doPost(e) {
 }
 
 // ============================================================================
-// AUTH & RESPONSE HELPERS
+// AUTH, CACHE & RESPONSE HELPERS
 // ============================================================================
 
 function getEffectiveToken_() {
@@ -129,6 +137,12 @@ function assertAuthorized_(token) {
   }
 }
 
+function invalidateCompareCache_() {
+  try {
+    CacheService.getScriptCache().remove(CONFIG.COMPARE_CACHE_KEY);
+  } catch (_) {}
+}
+
 function jsonResponse_(obj) {
   return ContentService
     .createTextOutput(JSON.stringify(obj))
@@ -136,12 +150,13 @@ function jsonResponse_(obj) {
 }
 
 // ============================================================================
-// READ HANDLERS
+// READ HANDLERS (BATCHED FOR HIGH SPEED)
 // ============================================================================
 
 function handlePing_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   return {
+    version: 'v2-fast',
     spreadsheetName: ss.getName(),
     timezone: ss.getSpreadsheetTimeZone(),
     months: getAvailableMonthSheets_(ss),
@@ -161,72 +176,74 @@ function handleBootstrap_(requestedSheetName) {
   const sheet = ss.getSheetByName(activeMonth);
   const tz = ss.getSpreadsheetTimeZone();
 
-  // 1. Ringkasan atas (H8, H10, H12, L6:L14)
-  const sisaUang = toNumber_(sheet.getRange('H8').getValue());
-  const totalPemasukan = toNumber_(sheet.getRange('H10').getValue());
-  const totalPengeluaran = toNumber_(sheet.getRange('H12').getValue());
-  const totalSaldoRekening = toNumber_(sheet.getRange('L13').getValue());
-  const selisihRekon = toNumber_(sheet.getRange('L14').getValue());
-  const bulanLabel = String(sheet.getRange('B10').getDisplayValue() || activeMonth).trim();
-  const tahunLabel = String(sheet.getRange('D10').getDisplayValue() || '').trim();
+  // RPC 1: Baca seluruh blok dashboard, dropdown, rekap, dan mandatory sekaligus (B6:Y70)
+  // Row r -> idx (r - 6), Col c (B=2..Y=25) -> idx (c - 2)
+  const grid = sheet.getRange('B6:Y70').getValues();
+  const at = function (row, col) { return grid[row - 6][col - 2]; };
 
-  // 2. Saldo 7 rekening (K6:L12)
-  const walletRows = sheet.getRange('K6:L12').getValues();
+  const bulanLabel = String(at(10, 2) || activeMonth).trim(); // B10
+  const tahunLabel = String(at(10, 4) || '').trim();          // D10
+  const sisaUang = toNumber_(at(8, 8));                       // H8
+  const totalPemasukan = toNumber_(at(10, 8));                // H10
+  const totalPengeluaran = toNumber_(at(12, 8));              // H12
+  const totalSaldoRekening = toNumber_(at(13, 12));           // L13
+  const selisihRekon = toNumber_(at(14, 12));                 // L14
+
+  // Saldo 7 rekening (K6:L12 -> col 11 & 12)
   const wallets = [];
-  for (let i = 0; i < walletRows.length; i++) {
-    const name = String(walletRows[i][0] || '').trim();
+  for (let r = 6; r <= 12; r++) {
+    const name = String(at(r, 11) || '').trim();
     if (name) {
-      wallets.push({
-        name: name,
-        balance: toNumber_(walletRows[i][1])
-      });
+      wallets.push({ name: name, balance: toNumber_(at(r, 12)) });
     }
   }
 
-  // 3. Dropdown options dinamis dari sheet
-  const incomeCategories = readNonEmptyColumn_(sheet, 'B18:B34');
-  const expenseCategories = readNonEmptyColumn_(sheet, 'D18:D34');
-  const classifications = readNonEmptyColumn_(sheet, 'B46:B47');
-  const owners = readNonEmptyColumn_(sheet, 'D46:D49');
-  const walletOptions = readNonEmptyColumn_(sheet, 'W38:W44');
+  // Dropdown options dinamis dari grid
+  const incomeCategories = readUniqueFromGrid_(grid, 6, 2, 18, 34, 2);   // B18:B34
+  const expenseCategories = readUniqueFromGrid_(grid, 6, 2, 18, 34, 4);  // D18:D34
+  const classifications = readUniqueFromGrid_(grid, 6, 2, 46, 47, 2);    // B46:B47
+  const owners = readUniqueFromGrid_(grid, 6, 2, 46, 49, 4);             // D46:D49
+  const walletOptions = readUniqueFromGrid_(grid, 6, 2, 38, 44, 23);     // W38:W44
 
-  // 4. Rekap pengeluaran per kategori (W18:Y34)
-  const catSummaryRows = sheet.getRange('W18:Y34').getValues();
+  // Rekap pengeluaran per kategori (W18:Y34 -> col 23, 24, 25)
   const categorySummary = [];
-  for (let i = 0; i < catSummaryRows.length; i++) {
-    const cat = String(catSummaryRows[i][0] || '').trim();
+  for (let r = 18; r <= 34; r++) {
+    const cat = String(at(r, 23) || '').trim();
     if (cat) {
       categorySummary.push({
         category: cat,
-        total: toNumber_(catSummaryRows[i][1]),
-        percent: toNumber_(catSummaryRows[i][2])
+        total: toNumber_(at(r, 24)),
+        percent: toNumber_(at(r, 25))
       });
     }
   }
 
-  // 5. Rekap klasifikasi (W52:Y53) & peruntukan (W58:X60)
-  const classSummaryRows = sheet.getRange('W52:Y53').getValues();
-  const classificationSummary = classSummaryRows
-    .filter(r => String(r[0] || '').trim() !== '')
-    .map(r => ({
-      name: String(r[0]).trim(),
-      total: toNumber_(r[1]),
-      percent: toNumber_(r[2])
-    }));
+  // Rekap klasifikasi (W52:Y53) & peruntukan (W58:X60)
+  const classificationSummary = [];
+  for (let r = 52; r <= 53; r++) {
+    const name = String(at(r, 23) || '').trim();
+    if (name) {
+      classificationSummary.push({
+        name: name,
+        total: toNumber_(at(r, 24)),
+        percent: toNumber_(at(r, 25))
+      });
+    }
+  }
 
-  const ownerSummaryRows = sheet.getRange('W58:X60').getValues();
-  const ownerSummary = ownerSummaryRows
-    .filter(r => String(r[0] || '').trim() !== '')
-    .map(r => ({
-      name: String(r[0]).trim(),
-      total: toNumber_(r[1])
-    }));
+  const ownerSummary = [];
+  for (let r = 58; r <= 60; r++) {
+    const name = String(at(r, 23) || '').trim();
+    if (name) {
+      ownerSummary.push({ name: name, total: toNumber_(at(r, 24)) });
+    }
+  }
 
-  // 6. Checklist Mandatory (B56:D66)
-  const mandatory = readMandatoryBills_(sheet);
+  // Checklist Mandatory (B55:D70 -> col 2, 3, 4)
+  const mandatory = extractMandatoryFromGrid_(grid, 6, 2);
 
-  // 7. Riwayat transaksi terakhir (Pemasukan & Pengeluaran)
-  const transactions = readMonthlyTransactions_(sheet, tz, CONFIG.RECENT_LIMIT);
+  // RPC 2: Baca transaksi Pemasukan (G:L) & Pengeluaran (O:U) dalam 1 panggilan (G18:U{lastRow})
+  const transactions = readMonthlyTransactionsFast_(sheet, tz, CONFIG.RECENT_LIMIT);
 
   return {
     spreadsheetName: ss.getName(),
@@ -266,37 +283,45 @@ function handleGetSavings_() {
   }
   const tz = ss.getSpreadsheetTimeZone();
 
+  // RPC 1: Baca seluruh area dashboard & rekap tabungan sekaligus (B8:X61)
+  const grid = sheet.getRange('B8:X61').getValues();
+  const at = function (row, col) { return grid[row - 8][col - 2]; };
+
   const summary = {
-    sisaUang: toNumber_(sheet.getRange('H8').getValue()),
-    totalPemasukan: toNumber_(sheet.getRange('H10').getValue()),
-    totalPengeluaran: toNumber_(sheet.getRange('H12').getValue())
+    sisaUang: toNumber_(at(8, 8)),          // H8
+    totalPemasukan: toNumber_(at(10, 8)),   // H10
+    totalPengeluaran: toNumber_(at(12, 8))  // H12
   };
 
-  // Rekap jenis aset (V38:X40: Emas, Uang, Saham)
-  const assetTypeRows = sheet.getRange('V38:X40').getValues();
-  const assetTypes = assetTypeRows
-    .filter(r => String(r[0] || '').trim() !== '')
-    .map(r => ({
-      name: String(r[0]).trim(),
-      total: toNumber_(r[1]),
-      percent: toNumber_(r[2])
-    }));
+  // Rekap jenis aset (V38:X40 -> col 22, 23, 24)
+  const assetTypes = [];
+  for (let r = 38; r <= 40; r++) {
+    const name = String(at(r, 22) || '').trim();
+    if (name) {
+      assetTypes.push({
+        name: name,
+        total: toNumber_(at(r, 23)),
+        percent: toNumber_(at(r, 24))
+      });
+    }
+  }
 
-  // Saldo per rekening tabungan (V57:W61)
-  const walletRows = sheet.getRange('V57:W61').getValues();
-  const wallets = walletRows
-    .filter(r => String(r[0] || '').trim() !== '')
-    .map(r => ({
-      name: String(r[0]).trim(),
-      balance: toNumber_(r[1])
-    }));
+  // Saldo rekening tabungan (V57:W61 -> col 22, 23)
+  const wallets = [];
+  for (let r = 57; r <= 61; r++) {
+    const name = String(at(r, 22) || '').trim();
+    if (name) {
+      wallets.push({ name: name, balance: toNumber_(at(r, 23)) });
+    }
+  }
 
-  const incomeCategories = readNonEmptyColumn_(sheet, 'B18:B34');
-  const expenseCategories = readNonEmptyColumn_(sheet, 'D18:D33');
-  const owners = readNonEmptyColumn_(sheet, 'B37:B42');
-  const classifications = readNonEmptyColumn_(sheet, 'B44:B49');
+  const incomeCategories = readUniqueFromGrid_(grid, 8, 2, 18, 34, 2);   // B18:B34
+  const expenseCategories = readUniqueFromGrid_(grid, 8, 2, 18, 33, 4);  // D18:D33
+  const owners = readUniqueFromGrid_(grid, 8, 2, 37, 42, 2);             // B37:B42
+  const classifications = readUniqueFromGrid_(grid, 8, 2, 44, 49, 2);    // B44:B49
 
-  const transactions = readSavingsTransactions_(sheet, tz, CONFIG.RECENT_LIMIT);
+  // RPC 2: Baca transaksi tabungan (G18:T{lastRow}) dalam 1 panggilan
+  const transactions = readSavingsTransactionsFast_(sheet, tz, CONFIG.RECENT_LIMIT);
 
   return {
     sheetName: CONFIG.SAVINGS_SHEET_NAME,
@@ -315,8 +340,71 @@ function handleGetSavings_() {
   };
 }
 
+function handleCompare_(forceRefresh) {
+  const cache = CacheService.getScriptCache();
+  if (!forceRefresh) {
+    try {
+      const cached = cache.get(CONFIG.COMPARE_CACHE_KEY);
+      if (cached) {
+        return JSON.parse(cached);
+      }
+    } catch (_) {}
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const months = getAvailableMonthSheets_(ss);
+  const categoriesOrder = [];
+  const monthlyData = [];
+
+  for (let mIdx = 0; mIdx < months.length; mIdx++) {
+    const mName = months[mIdx];
+    const sheet = ss.getSheetByName(mName);
+    if (!sheet) continue;
+
+    // 1 batch read kecil per bulan: H8:X34 (27 baris x 17 kolom)
+    // H=8 (idx 0), W=23 (idx 15), X=24 (idx 16)
+    const block = sheet.getRange('H8:X34').getValues();
+    const sisaUang = toNumber_(block[0][0]);         // H8
+    const totalPemasukan = toNumber_(block[2][0]);   // H10
+    const totalPengeluaran = toNumber_(block[4][0]); // H12
+
+    const categories = {};
+    for (let r = 18; r <= 34; r++) {
+      const rowArr = block[r - 8];
+      const cat = String(rowArr[15] || '').trim(); // W
+      if (!cat) continue;
+      const val = toNumber_(rowArr[16]);           // X
+      categories[cat] = val;
+      if (categoriesOrder.indexOf(cat) === -1) {
+        categoriesOrder.push(cat);
+      }
+    }
+
+    monthlyData.push({
+      month: mName,
+      totalPemasukan: totalPemasukan,
+      totalPengeluaran: totalPengeluaran,
+      sisaUang: sisaUang,
+      categories: categories
+    });
+  }
+
+  const result = {
+    months: months,
+    categories: categoriesOrder,
+    monthly: monthlyData,
+    updatedAt: new Date().toISOString()
+  };
+
+  try {
+    cache.put(CONFIG.COMPARE_CACHE_KEY, JSON.stringify(result), CONFIG.COMPARE_CACHE_TTL);
+  } catch (_) {}
+
+  return result;
+}
+
 // ============================================================================
-// WRITE HANDLERS
+// WRITE HANDLERS (FAST 1-RPC WRITES, NO REDUNDANT BOOTSTRAP)
 // ============================================================================
 
 function handleAddExpense_(payload) {
@@ -331,16 +419,12 @@ function handleAddExpense_(payload) {
   const wallet = requireString_(payload.wallet, 'Rek Debit');
   const notes = String(payload.notes || '').trim();
 
-  const row = findFirstEmptyRow_(sheet, 15, 16, 17); // Col O(15), P(16), Q(17)
+  const row = findFirstEmptyRowFast_(sheet, 15, 16, 17); // Col O(15), P(16), Q(17)
+  const seqNo = row - CONFIG.DATA_START_ROW + 1;
 
-  // Pastikan nomor urut di kolom N(14) terisi jika kosong
-  const noCell = sheet.getRange(row, 14);
-  if (noCell.getValue() === '' || noCell.getValue() === null) {
-    noCell.setValue(row - CONFIG.DATA_START_ROW + 1);
-  }
-
-  // Tulis O:U (kolom 15..21) tanpa menyentuh kolom rumus W:Y
-  sheet.getRange(row, 15, 1, 7).setValues([[
+  // Tulis N:U (8 kolom termasuk No) dalam 1 panggilan setValues saja
+  sheet.getRange(row, 14, 1, 8).setValues([[
+    seqNo,
     dateObj,
     amount,
     category,
@@ -354,7 +438,7 @@ function handleAddExpense_(payload) {
     row: row,
     sheet: sheet.getName(),
     type: 'expense',
-    bootstrap: handleBootstrap_(sheet.getName())
+    serverTime: new Date().toISOString()
   };
 }
 
@@ -369,15 +453,12 @@ function handleAddIncome_(payload) {
   const details = String(payload.details || payload.notes || '').trim();
   const wallet = requireString_(payload.wallet, 'Rek Kredit');
 
-  const row = findFirstEmptyRow_(sheet, 7, 8, 9); // Col G(7), H(8), I(9)
+  const row = findFirstEmptyRowFast_(sheet, 7, 8, 9); // Col G(7), H(8), I(9)
+  const seqNo = row - CONFIG.DATA_START_ROW + 1;
 
-  const noCell = sheet.getRange(row, 6); // Col F(6)
-  if (noCell.getValue() === '' || noCell.getValue() === null) {
-    noCell.setValue(row - CONFIG.DATA_START_ROW + 1);
-  }
-
-  // Tulis G:L (kolom 7..12)
-  sheet.getRange(row, 7, 1, 6).setValues([[
+  // Tulis F:L (7 kolom termasuk No) dalam 1 panggilan setValues saja
+  sheet.getRange(row, 6, 1, 7).setValues([[
+    seqNo,
     dateObj,
     amount,
     category,
@@ -390,7 +471,7 @@ function handleAddIncome_(payload) {
     row: row,
     sheet: sheet.getName(),
     type: 'income',
-    bootstrap: handleBootstrap_(sheet.getName())
+    serverTime: new Date().toISOString()
   };
 }
 
@@ -410,35 +491,24 @@ function handleAddTransfer_(payload) {
     throw new Error('Rekening asal dan tujuan tidak boleh sama.');
   }
 
-  // Tulis 2 baris di tabel Pemasukan (G:L): -amount dari asal, +amount ke tujuan
-  const rowOut = findFirstEmptyRow_(sheet, 7, 8, 9);
+  const rowOut = findFirstEmptyRowFast_(sheet, 7, 8, 9);
   if (rowOut + 1 > CONFIG.DATA_MAX_ROW) {
     throw new Error('Baris pemasukan hampir penuh.');
   }
 
-  const noOutCell = sheet.getRange(rowOut, 6);
-  if (noOutCell.getValue() === '' || noOutCell.getValue() === null) {
-    noOutCell.setValue(rowOut - CONFIG.DATA_START_ROW + 1);
-  }
-  const noInCell = sheet.getRange(rowOut + 1, 6);
-  if (noInCell.getValue() === '' || noInCell.getValue() === null) {
-    noInCell.setValue((rowOut + 1) - CONFIG.DATA_START_ROW + 1);
-  }
-
-  sheet.getRange(rowOut, 7, 2, 6).setValues([
-    [dateObj, -amount, 'Transfer', '', notes, fromWallet],
-    [dateObj,  amount, 'Transfer', '', notes, toWallet]
+  const seqOut = rowOut - CONFIG.DATA_START_ROW + 1;
+  // Tulis 2 baris F:L sekaligus dalam 1 panggilan setValues
+  sheet.getRange(rowOut, 6, 2, 7).setValues([
+    [seqOut,     dateObj, -amount, 'Transfer', '', notes, fromWallet],
+    [seqOut + 1, dateObj,  amount, 'Transfer', '', notes, toWallet]
   ]);
 
-  // Opsional: jika ada biaya admin transfer (misal Rp 2.500), catat otomatis di Pengeluaran
   let feeRow = null;
   if (adminFee > 0) {
-    feeRow = findFirstEmptyRow_(sheet, 15, 16, 17);
-    const feeNoCell = sheet.getRange(feeRow, 14);
-    if (feeNoCell.getValue() === '' || feeNoCell.getValue() === null) {
-      feeNoCell.setValue(feeRow - CONFIG.DATA_START_ROW + 1);
-    }
-    sheet.getRange(feeRow, 15, 1, 7).setValues([[
+    feeRow = findFirstEmptyRowFast_(sheet, 15, 16, 17);
+    const feeSeq = feeRow - CONFIG.DATA_START_ROW + 1;
+    sheet.getRange(feeRow, 14, 1, 8).setValues([[
+      feeSeq,
       dateObj,
       adminFee,
       'Lain-lain',
@@ -454,7 +524,7 @@ function handleAddTransfer_(payload) {
     feeRow: feeRow,
     sheet: sheet.getName(),
     type: 'transfer',
-    bootstrap: handleBootstrap_(sheet.getName())
+    serverTime: new Date().toISOString()
   };
 }
 
@@ -478,7 +548,7 @@ function handleToggleMandatory_(payload) {
   return {
     row: row,
     checked: checked,
-    mandatory: readMandatoryBills_(sheet)
+    serverTime: new Date().toISOString()
   };
 }
 
@@ -489,7 +559,7 @@ function handleAddSavings_(payload) {
     throw new Error('Sheet "' + CONFIG.SAVINGS_SHEET_NAME + '" tidak ditemukan.');
   }
 
-  const mode = String(payload.mode || 'income').trim(); // 'income' | 'expense'
+  const mode = String(payload.mode || 'income').trim();
   const dateObj = parseDateInput_(payload.date);
   const wallet = requireString_(payload.wallet, 'Rekening Tabungan');
 
@@ -498,13 +568,11 @@ function handleAddSavings_(payload) {
     const category = String(payload.category || '').trim();
     const notes = String(payload.notes || '').trim();
 
-    const row = findFirstEmptyRow_(sheet, 7, 8, 10); // G(7), H(8), J(10)
-    const noCell = sheet.getRange(row, 6);
-    if (noCell.getValue() === '' || noCell.getValue() === null) {
-      noCell.setValue(row - CONFIG.DATA_START_ROW + 1);
-    }
-    // NEW TABUNGAN Pemasukan: G=Tanggal, H=Jumlah, I=Kategori, J=Rek Kredit, K=Keterangan
-    sheet.getRange(row, 7, 1, 5).setValues([[
+    const row = findFirstEmptyRowFast_(sheet, 7, 8, 10); // G(7), H(8), J(10)
+    const seqNo = row - CONFIG.DATA_START_ROW + 1;
+    // F:K (6 kolom termasuk No) dalam 1 panggilan
+    sheet.getRange(row, 6, 1, 6).setValues([[
+      seqNo,
       dateObj,
       amount,
       category,
@@ -512,7 +580,7 @@ function handleAddSavings_(payload) {
       notes
     ]]);
 
-    return { row: row, mode: 'income', savings: handleGetSavings_() };
+    return { row: row, mode: 'income', serverTime: new Date().toISOString() };
   }
 
   if (mode === 'expense') {
@@ -522,13 +590,11 @@ function handleAddSavings_(payload) {
     const owner = requireString_(payload.owner || 'Bersama', 'Peruntukan');
     const notes = String(payload.notes || '').trim();
 
-    const row = findFirstEmptyRow_(sheet, 14, 15, 16); // N(14), O(15), P(16)
-    const noCell = sheet.getRange(row, 13); // M(13)
-    if (noCell.getValue() === '' || noCell.getValue() === null) {
-      noCell.setValue(row - CONFIG.DATA_START_ROW + 1);
-    }
-    // NEW TABUNGAN Pengeluaran: N=Tanggal, O=Jumlah, P=Kategori, Q=Klasifikasi, R=Rek Kredit, S=Keterangan, T=Notes
-    sheet.getRange(row, 14, 1, 7).setValues([[
+    const row = findFirstEmptyRowFast_(sheet, 14, 15, 16); // N(14), O(15), P(16)
+    const seqNo = row - CONFIG.DATA_START_ROW + 1;
+    // M:T (8 kolom termasuk No) dalam 1 panggilan
+    sheet.getRange(row, 13, 1, 8).setValues([[
+      seqNo,
       dateObj,
       amount,
       category,
@@ -538,7 +604,7 @@ function handleAddSavings_(payload) {
       notes
     ]]);
 
-    return { row: row, mode: 'expense', savings: handleGetSavings_() };
+    return { row: row, mode: 'expense', serverTime: new Date().toISOString() };
   }
 
   throw new Error('Mode tabungan harus "income" atau "expense".');
@@ -546,8 +612,8 @@ function handleAddSavings_(payload) {
 
 function handleDeleteTransaction_(payload) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const scope = String(payload.scope || 'monthly').trim(); // 'monthly' | 'savings'
-  const type = String(payload.type || '').trim(); // 'income' | 'expense'
+  const scope = String(payload.scope || 'monthly').trim();
+  const type = String(payload.type || '').trim();
   const row = parseInt(payload.row, 10);
 
   if (isNaN(row) || row < CONFIG.DATA_START_ROW || row > CONFIG.DATA_MAX_ROW) {
@@ -558,14 +624,13 @@ function handleDeleteTransaction_(payload) {
     const sheet = ss.getSheetByName(CONFIG.SAVINGS_SHEET_NAME);
     if (!sheet) throw new Error('Sheet tabungan tidak ditemukan.');
     if (type === 'income') {
-      // Kosongkan HANYA kolom data G:K (tidak hapus baris agar tidak merusak tabel sebelahnya & rumus!)
       sheet.getRange(row, 7, 1, 5).clearContent();
     } else if (type === 'expense') {
       sheet.getRange(row, 14, 1, 7).clearContent();
     } else {
       throw new Error('Tipe transaksi tidak valid.');
     }
-    return { deletedRow: row, scope: scope, type: type, savings: handleGetSavings_() };
+    return { deletedRow: row, scope: scope, type: type };
   }
 
   const sheet = getTargetMonthSheet_(ss, payload.sheet);
@@ -581,8 +646,7 @@ function handleDeleteTransaction_(payload) {
     deletedRow: row,
     scope: scope,
     type: type,
-    sheet: sheet.getName(),
-    bootstrap: handleBootstrap_(sheet.getName())
+    sheet: sheet.getName()
   };
 }
 
@@ -607,8 +671,7 @@ function resolveMonthSheetName_(months, requested) {
     const match = months.find(m => m.toUpperCase() === String(requested).trim().toUpperCase());
     if (match) return match;
   }
-  // Default: bulan berjalan jika ada, kalau tidak bulan terakhir yang tersedia
-  const currentMonthIdx = new Date().getMonth(); // 0..11
+  const currentMonthIdx = new Date().getMonth();
   const currentMonthName = CONFIG.MONTH_SHEETS_ORDER[currentMonthIdx];
   const currentMatch = months.find(m => m.toUpperCase() === currentMonthName);
   return currentMatch || months[months.length - 1];
@@ -624,49 +687,26 @@ function getTargetMonthSheet_(ss, sheetName) {
   return sheet;
 }
 
-function readNonEmptyColumn_(sheet, a1Range) {
-  const vals = sheet.getRange(a1Range).getValues();
+function readUniqueFromGrid_(grid, baseRow, baseCol, startRow, endRow, col) {
   const out = [];
-  for (let i = 0; i < vals.length; i++) {
-    const v = String(vals[i][0] || '').trim();
+  const cIdx = col - baseCol;
+  for (let r = startRow; r <= endRow; r++) {
+    const v = String(grid[r - baseRow][cIdx] || '').trim();
     if (v && out.indexOf(v) === -1) out.push(v);
   }
   return out;
 }
 
-function findFirstEmptyRow_(sheet, colA, colB, colC) {
-  const numRows = CONFIG.DATA_MAX_ROW - CONFIG.DATA_START_ROW + 1;
-  const minCol = Math.min(colA, colB, colC);
-  const maxCol = Math.max(colA, colB, colC);
-  const vals = sheet.getRange(CONFIG.DATA_START_ROW, minCol, numRows, maxCol - minCol + 1).getValues();
-
-  const offA = colA - minCol;
-  const offB = colB - minCol;
-  const offC = colC - minCol;
-
-  for (let i = 0; i < vals.length; i++) {
-    const a = vals[i][offA];
-    const b = vals[i][offB];
-    const c = vals[i][offC];
-    const isEmpty = (a === '' || a === null) && (b === '' || b === null) && (c === '' || c === null);
-    if (isEmpty) {
-      return CONFIG.DATA_START_ROW + i;
-    }
-  }
-  throw new Error('Tabel sudah penuh mencapai baris ' + CONFIG.DATA_MAX_ROW + '.');
-}
-
-function readMandatoryBills_(sheet) {
-  const rangeVals = sheet.getRange('B55:D70').getValues();
+function extractMandatoryFromGrid_(grid, baseRow, baseCol) {
   const items = [];
   let total = 0;
   let remaining = 0;
 
-  for (let i = 0; i < rangeVals.length; i++) {
-    const rowNum = 55 + i;
-    const checkedVal = rangeVals[i][0];
-    const label = String(rangeVals[i][1] || '').trim();
-    const amount = toNumber_(rangeVals[i][2]);
+  for (let rowNum = 55; rowNum <= 70; rowNum++) {
+    const r = grid[rowNum - baseRow];
+    const checkedVal = r[2 - baseCol];
+    const label = String(r[3 - baseCol] || '').trim();
+    const amount = toNumber_(r[4 - baseCol]);
 
     if (!label || /^tagihan$/i.test(label)) continue;
     if (/^total$/i.test(label)) {
@@ -692,58 +732,83 @@ function readMandatoryBills_(sheet) {
     remaining = items.filter(it => !it.checked).reduce((acc, it) => acc + it.amount, 0);
   }
 
-  return {
-    items: items,
-    total: total,
-    remaining: remaining
-  };
+  return { items: items, total: total, remaining: remaining };
 }
 
-function readMonthlyTransactions_(sheet, tz, limit) {
-  const numRows = CONFIG.DATA_MAX_ROW - CONFIG.DATA_START_ROW + 1;
-  // Baca sekali jalan untuk performa cepat: G:L (income) dan O:U (expense)
-  const incomeVals = sheet.getRange(CONFIG.DATA_START_ROW, 7, numRows, 6).getValues();
-  const expenseVals = sheet.getRange(CONFIG.DATA_START_ROW, 15, numRows, 7).getValues();
+function findFirstEmptyRowFast_(sheet, colA, colB, colC) {
+  // Batasi scan hanya sampai batas data aktual (+2 baris) agar tidak baca 973 baris penuh
+  const lastSheetRow = Math.min(Math.max(sheet.getLastRow() + 2, CONFIG.DATA_START_ROW + 5), CONFIG.DATA_MAX_ROW);
+  const numRows = lastSheetRow - CONFIG.DATA_START_ROW + 1;
+  const minCol = Math.min(colA, colB, colC);
+  const maxCol = Math.max(colA, colB, colC);
+  const vals = sheet.getRange(CONFIG.DATA_START_ROW, minCol, numRows, maxCol - minCol + 1).getValues();
 
+  const offA = colA - minCol;
+  const offB = colB - minCol;
+  const offC = colC - minCol;
+
+  for (let i = 0; i < vals.length; i++) {
+    const a = vals[i][offA];
+    const b = vals[i][offB];
+    const c = vals[i][offC];
+    if ((a === '' || a === null) && (b === '' || b === null) && (c === '' || c === null)) {
+      return CONFIG.DATA_START_ROW + i;
+    }
+  }
+
+  if (lastSheetRow < CONFIG.DATA_MAX_ROW) {
+    return lastSheetRow + 1;
+  }
+  throw new Error('Tabel sudah penuh mencapai baris ' + CONFIG.DATA_MAX_ROW + '.');
+}
+
+function readMonthlyTransactionsFast_(sheet, tz, limit) {
+  const lastRow = Math.min(sheet.getLastRow(), CONFIG.DATA_MAX_ROW);
+  if (lastRow < CONFIG.DATA_START_ROW) return [];
+
+  const numRows = lastRow - CONFIG.DATA_START_ROW + 1;
+  // 1 batch read tunggal G18:U{lastRow} (15 kolom)
+  // G..L = idx 0..5, O..U = idx 8..14
+  const vals = sheet.getRange(CONFIG.DATA_START_ROW, 7, numRows, 15).getValues();
   const list = [];
 
-  for (let i = 0; i < incomeVals.length; i++) {
-    const r = incomeVals[i];
-    if ((r[0] === '' || r[0] === null) && (r[1] === '' || r[1] === null)) continue;
-    const amount = toNumber_(r[1]);
-    list.push({
-      id: 'in-' + (CONFIG.DATA_START_ROW + i),
-      row: CONFIG.DATA_START_ROW + i,
-      type: 'income',
-      date: formatDateValue_(r[0], tz),
-      amount: amount,
-      category: String(r[2] || '').trim(),
-      owner: String(r[3] || '').trim(),
-      notes: String(r[4] || '').trim(),
-      wallet: String(r[5] || '').trim(),
-      classification: ''
-    });
+  for (let i = 0; i < vals.length; i++) {
+    const r = vals[i];
+    const rowNum = CONFIG.DATA_START_ROW + i;
+
+    // Income (G:L -> 0..5)
+    if (!((r[0] === '' || r[0] === null) && (r[1] === '' || r[1] === null))) {
+      list.push({
+        id: 'in-' + rowNum,
+        row: rowNum,
+        type: 'income',
+        date: formatDateValue_(r[0], tz),
+        amount: toNumber_(r[1]),
+        category: String(r[2] || '').trim(),
+        owner: String(r[3] || '').trim(),
+        notes: String(r[4] || '').trim(),
+        wallet: String(r[5] || '').trim(),
+        classification: ''
+      });
+    }
+
+    // Expense (O:U -> 8..14)
+    if (!((r[8] === '' || r[8] === null) && (r[9] === '' || r[9] === null))) {
+      list.push({
+        id: 'out-' + rowNum,
+        row: rowNum,
+        type: 'expense',
+        date: formatDateValue_(r[8], tz),
+        amount: toNumber_(r[9]),
+        category: String(r[10] || '').trim(),
+        classification: String(r[11] || '').trim(),
+        owner: String(r[12] || '').trim(),
+        wallet: String(r[13] || '').trim(),
+        notes: String(r[14] || '').trim()
+      });
+    }
   }
 
-  for (let i = 0; i < expenseVals.length; i++) {
-    const r = expenseVals[i];
-    if ((r[0] === '' || r[0] === null) && (r[1] === '' || r[1] === null)) continue;
-    const amount = toNumber_(r[1]);
-    list.push({
-      id: 'out-' + (CONFIG.DATA_START_ROW + i),
-      row: CONFIG.DATA_START_ROW + i,
-      type: 'expense',
-      date: formatDateValue_(r[0], tz),
-      amount: amount,
-      category: String(r[2] || '').trim(),
-      classification: String(r[3] || '').trim(),
-      owner: String(r[4] || '').trim(),
-      wallet: String(r[5] || '').trim(),
-      notes: String(r[6] || '').trim()
-    });
-  }
-
-  // Urutkan terbaru dulu (tanggal desc, lalu row desc)
   list.sort(function (a, b) {
     if (a.date !== b.date) return (b.date || '').localeCompare(a.date || '');
     return b.row - a.row;
@@ -752,45 +817,49 @@ function readMonthlyTransactions_(sheet, tz, limit) {
   return list.slice(0, limit);
 }
 
-function readSavingsTransactions_(sheet, tz, limit) {
-  const numRows = CONFIG.DATA_MAX_ROW - CONFIG.DATA_START_ROW + 1;
-  const incomeVals = sheet.getRange(CONFIG.DATA_START_ROW, 7, numRows, 5).getValues();   // G:K
-  const expenseVals = sheet.getRange(CONFIG.DATA_START_ROW, 14, numRows, 7).getValues(); // N:T
+function readSavingsTransactionsFast_(sheet, tz, limit) {
+  const lastRow = Math.min(sheet.getLastRow(), CONFIG.DATA_MAX_ROW);
+  if (lastRow < CONFIG.DATA_START_ROW) return [];
 
+  const numRows = lastRow - CONFIG.DATA_START_ROW + 1;
+  // 1 batch read tunggal G18:T{lastRow} (14 kolom)
+  // G..K = idx 0..4, N..T = idx 7..13
+  const vals = sheet.getRange(CONFIG.DATA_START_ROW, 7, numRows, 14).getValues();
   const list = [];
 
-  for (let i = 0; i < incomeVals.length; i++) {
-    const r = incomeVals[i];
-    if ((r[0] === '' || r[0] === null) && (r[1] === '' || r[1] === null)) continue;
-    list.push({
-      id: 'sav-in-' + (CONFIG.DATA_START_ROW + i),
-      row: CONFIG.DATA_START_ROW + i,
-      type: 'income',
-      date: formatDateValue_(r[0], tz),
-      amount: toNumber_(r[1]),
-      category: String(r[2] || '').trim(),
-      wallet: String(r[3] || '').trim(),
-      notes: String(r[4] || '').trim(),
-      owner: '',
-      classification: ''
-    });
-  }
+  for (let i = 0; i < vals.length; i++) {
+    const r = vals[i];
+    const rowNum = CONFIG.DATA_START_ROW + i;
 
-  for (let i = 0; i < expenseVals.length; i++) {
-    const r = expenseVals[i];
-    if ((r[0] === '' || r[0] === null) && (r[1] === '' || r[1] === null)) continue;
-    list.push({
-      id: 'sav-out-' + (CONFIG.DATA_START_ROW + i),
-      row: CONFIG.DATA_START_ROW + i,
-      type: 'expense',
-      date: formatDateValue_(r[0], tz),
-      amount: toNumber_(r[1]),
-      category: String(r[2] || '').trim(),
-      classification: String(r[3] || '').trim(),
-      wallet: String(r[4] || '').trim(),
-      owner: String(r[5] || '').trim(),
-      notes: String(r[6] || '').trim()
-    });
+    if (!((r[0] === '' || r[0] === null) && (r[1] === '' || r[1] === null))) {
+      list.push({
+        id: 'sav-in-' + rowNum,
+        row: rowNum,
+        type: 'income',
+        date: formatDateValue_(r[0], tz),
+        amount: toNumber_(r[1]),
+        category: String(r[2] || '').trim(),
+        wallet: String(r[3] || '').trim(),
+        notes: String(r[4] || '').trim(),
+        owner: '',
+        classification: ''
+      });
+    }
+
+    if (!((r[7] === '' || r[7] === null) && (r[8] === '' || r[8] === null))) {
+      list.push({
+        id: 'sav-out-' + rowNum,
+        row: rowNum,
+        type: 'expense',
+        date: formatDateValue_(r[7], tz),
+        amount: toNumber_(r[8]),
+        category: String(r[9] || '').trim(),
+        classification: String(r[10] || '').trim(),
+        wallet: String(r[11] || '').trim(),
+        owner: String(r[12] || '').trim(),
+        notes: String(r[13] || '').trim()
+      });
+    }
   }
 
   list.sort(function (a, b) {

@@ -542,11 +542,235 @@
     `;
   }
 
+  // ==========================================================================
+  // 5. GRAFIK PERBANDINGAN ANTAR BULAN
+  // ==========================================================================
+
+  function shortMonthName(m) {
+    return String(m || '').slice(0, 3).toUpperCase();
+  }
+
+  function sumCategoriesForMonth(monthObj, includeSavings) {
+    if (!monthObj) return 0;
+    const cats = monthObj.categories || {};
+    if (includeSavings) return Number(monthObj.totalPengeluaran) || 0;
+    return Object.keys(cats).reduce((sum, k) => {
+      if (k.toLowerCase() === 'tabungan') return sum;
+      return sum + (Number(cats[k]) || 0);
+    }, 0);
+  }
+
+  function renderCompare(compareData, cmpState) {
+    if (!compareData) {
+      return '<div class="loading-state"><div class="spinner"></div><p>Memuat grafik perbandingan antar bulan...</p></div>';
+    }
+    const monthly = compareData.monthly || [];
+    const months = compareData.months || [];
+    if (monthly.length === 0) {
+      return '<div class="card empty-state">Belum ada data bulanan untuk dibandingkan.</div>';
+    }
+
+    const monthAName = months.includes(cmpState.monthA) ? cmpState.monthA : months[Math.max(0, months.length - 2)];
+    const monthBName = months.includes(cmpState.monthB) ? cmpState.monthB : months[months.length - 1];
+    const objA = monthly.find((m) => m.month === monthAName) || monthly[0];
+    const objB = monthly.find((m) => m.month === monthBName) || monthly[monthly.length - 1];
+
+    const includeSav = cmpState.includeSavings !== false; // default true
+    const totalA = sumCategoriesForMonth(objA, includeSav);
+    const totalB = sumCategoriesForMonth(objB, includeSav);
+    const diffExp = totalB - totalA;
+    const diffExpPct = totalA > 0 ? (diffExp / totalA) : 0;
+    const expPillClass = diffExp > 0 ? 'up' : (diffExp < 0 ? 'down' : 'flat');
+    const expArrow = diffExp > 0 ? '▲' : (diffExp < 0 ? '▼' : '•');
+
+    // Data tren multi-bulan (Total Pengeluaran atau 1 Kategori)
+    const metric = cmpState.trendMetric || 'TOTAL';
+    const trendPoints = monthly.map((m) => {
+      let val = 0;
+      if (metric === 'TOTAL') {
+        val = sumCategoriesForMonth(m, includeSav);
+      } else {
+        val = Number((m.categories || {})[metric]) || 0;
+      }
+      return { month: m.month, short: shortMonthName(m.month), val };
+    });
+
+    const maxTrend = Math.max(1, ...trendPoints.map((p) => p.val));
+    const barGap = 8;
+    const barWidth = Math.max(24, Math.floor(320 / Math.max(trendPoints.length, 4)) - barGap);
+    const svgWidth = Math.max(320, trendPoints.length * (barWidth + barGap) + 16);
+    const chartTop = 24;
+    const chartHeight = 132;
+
+    const barsSvg = trendPoints.map((p, idx) => {
+      const x = 10 + idx * (barWidth + barGap);
+      const h = p.val > 0 ? Math.max(4, Math.round((p.val / maxTrend) * chartHeight)) : 2;
+      const y = chartTop + chartHeight - h;
+      const isA = p.month === monthAName;
+      const isB = p.month === monthBName;
+      const fill = isB ? 'var(--primary)' : (isA ? '#8E8E93' : 'rgba(142, 142, 147, 0.35)');
+      const labelColor = isB ? 'var(--primary)' : (isA ? 'var(--text)' : 'var(--text-secondary)');
+      const showTopVal = isA || isB || p.val === maxTrend;
+
+      return `
+        <g class="trend-bar-group" data-pick-month="${F.escapeHtml(p.month)}">
+          ${showTopVal && p.val > 0 ? `<text x="${x + barWidth / 2}" y="${Math.max(11, y - 5)}" text-anchor="middle" class="trend-val-label">${F.escapeHtml(F.formatCompact(p.val).replace('Rp ', ''))}</text>` : ''}
+          <rect x="${x}" y="${y}" width="${barWidth}" height="${h}" rx="5" fill="${fill}" />
+          <text x="${x + barWidth / 2}" y="${chartTop + chartHeight + 16}" text-anchor="middle" class="trend-label" style="fill:${labelColor}">${F.escapeHtml(p.short)}</text>
+        </g>
+      `;
+    }).join('');
+
+    // Data perbandingan per kategori (Bulan A vs Bulan B)
+    const allCats = (compareData.categories || []).filter((c) => includeSav || c.toLowerCase() !== 'tabungan');
+    const catPairs = allCats.map((cat) => {
+      const a = Number((objA.categories || {})[cat]) || 0;
+      const b = Number((objB.categories || {})[cat]) || 0;
+      return { cat, a, b, diff: b - a, max: Math.max(a, b) };
+    }).filter((item) => item.a > 0 || item.b > 0);
+
+    const sortMode = cmpState.sort || 'max';
+    catPairs.sort((x, y) => {
+      if (sortMode === 'inc') return y.diff - x.diff;
+      if (sortMode === 'dec') return x.diff - y.diff;
+      return y.max - x.max;
+    });
+    const maxCatVal = Math.max(1, ...catPairs.map((c) => c.max));
+
+    return `
+      <section class="card">
+        <div class="section-header">
+          <h2 class="section-title">Pilih 2 Bulan untuk Dibandingkan</h2>
+          <span class="section-sub">${months.length} bulan</span>
+        </div>
+        <div class="compare-picker">
+          <div>
+            <label class="form-label" for="cmpMonthA">Bulan A (Pembanding)</label>
+            <select id="cmpMonthA" class="ios-select" style="margin-top:4px;">
+              ${months.map((m) => `<option value="${F.escapeHtml(m)}" ${m === monthAName ? 'selected' : ''}>${F.escapeHtml(m)}</option>`).join('')}
+            </select>
+          </div>
+          <button type="button" id="swapCompareBtn" class="swap-btn" title="Tukar Bulan">⇄</button>
+          <div>
+            <label class="form-label" for="cmpMonthB">Bulan B (Target)</label>
+            <select id="cmpMonthB" class="ios-select" style="margin-top:4px;">
+              ${months.map((m) => `<option value="${F.escapeHtml(m)}" ${m === monthBName ? 'selected' : ''}>${F.escapeHtml(m)}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="compare-options-row">
+          <label class="ios-switch">
+            <input type="checkbox" id="cmpIncludeSavings" ${includeSav ? 'checked' : ''} />
+            <span>Sertakan kategori Tabungan</span>
+          </label>
+          <span class="section-sub">${F.escapeHtml(shortMonthName(monthAName))} → ${F.escapeHtml(shortMonthName(monthBName))}</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="section-header">
+          <h2 class="section-title">Selisih Pengeluaran (${F.escapeHtml(shortMonthName(monthAName))} vs ${F.escapeHtml(shortMonthName(monthBName))})</h2>
+        </div>
+        <div class="delta-grid">
+          <div class="delta-box">
+            <div class="delta-label"><span class="legend-dot dot-a"></span>${F.escapeHtml(monthAName)}</div>
+            <div class="delta-val">${F.formatRupiah(totalA)}</div>
+          </div>
+          <div class="delta-box">
+            <div class="delta-label"><span class="legend-dot dot-b"></span>${F.escapeHtml(monthBName)}</div>
+            <div class="delta-val">${F.formatRupiah(totalB)}</div>
+          </div>
+          <div class="delta-box full">
+            <div>
+              <div class="delta-label">Perubahan (${F.escapeHtml(shortMonthName(monthBName))} − ${F.escapeHtml(shortMonthName(monthAName))})</div>
+              <div class="delta-val" style="font-size:15px;">${F.formatRupiah(diffExp, true)}</div>
+            </div>
+            <span class="delta-pill ${expPillClass}">${expArrow} ${F.formatPercent(Math.abs(diffExpPct))}</span>
+          </div>
+        </div>
+        <div class="mini-grid two-col" style="margin-top:10px;">
+          <div class="mini-stat">
+            <div class="mini-stat-label">Pemasukan ${F.escapeHtml(shortMonthName(monthAName))} → ${F.escapeHtml(shortMonthName(monthBName))}</div>
+            <div class="mini-stat-val">${F.formatCompact(objA.totalPemasukan)} → ${F.formatCompact(objB.totalPemasukan)}</div>
+          </div>
+          <div class="mini-stat">
+            <div class="mini-stat-label">Sisa Uang ${F.escapeHtml(shortMonthName(monthAName))} → ${F.escapeHtml(shortMonthName(monthBName))}</div>
+            <div class="mini-stat-val">${F.formatCompact(objA.sisaUang)} → ${F.formatCompact(objB.sisaUang)}</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="section-header">
+          <h2 class="section-title">Grafik Tren Bulanan</h2>
+          <span class="section-sub">Tap batang untuk pilih</span>
+        </div>
+        <div class="form-group" style="margin-top:0;margin-bottom:10px;">
+          <select id="cmpTrendMetric" class="ios-select" style="padding:9px 12px;font-size:13px;">
+            <option value="TOTAL" ${metric === 'TOTAL' ? 'selected' : ''}>📊 Total Pengeluaran${includeSav ? ' (Semua)' : ' (Tanpa Tabungan)'}</option>
+            ${(compareData.categories || []).map((c) => `
+              <option value="${F.escapeHtml(c)}" ${metric === c ? 'selected' : ''}>${F.getCategoryIcon(c)} Tren Kategori: ${F.escapeHtml(c)}</option>
+            `).join('')}
+          </select>
+        </div>
+        <div class="chart-legend">
+          <span><span class="legend-dot dot-a"></span>${F.escapeHtml(monthAName)}</span>
+          <span><span class="legend-dot dot-b"></span>${F.escapeHtml(monthBName)}</span>
+          <span><span class="legend-dot dot-other"></span>Bulan lain</span>
+        </div>
+        <div class="svg-chart-scroll">
+          <svg class="trend-svg" viewBox="0 0 ${svgWidth} 185" preserveAspectRatio="xMinYMid meet">
+            ${barsSvg}
+          </svg>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="section-header">
+          <h2 class="section-title">Perbandingan per Kategori</h2>
+          <span class="section-sub">${catPairs.length} kategori</span>
+        </div>
+        <div class="segmented" style="margin-bottom:10px;">
+          <button type="button" class="seg-btn ${sortMode === 'max' ? 'active' : ''}" data-cmp-sort="max">Terbesar</button>
+          <button type="button" class="seg-btn ${sortMode === 'inc' ? 'active' : ''}" data-cmp-sort="inc">Naik Tertinggi</button>
+          <button type="button" class="seg-btn ${sortMode === 'dec' ? 'active' : ''}" data-cmp-sort="dec">Paling Hemat</button>
+        </div>
+        ${catPairs.length ? catPairs.map((item) => {
+          const wA = Math.round((item.a / maxCatVal) * 100);
+          const wB = Math.round((item.b / maxCatVal) * 100);
+          const pillCls = item.diff > 0 ? 'up' : (item.diff < 0 ? 'down' : 'flat');
+          const diffSign = item.diff > 0 ? '+' : '';
+          return `
+            <div class="cmp-cat-row">
+              <div class="cmp-cat-head">
+                <span class="cmp-cat-name">${F.getCategoryIcon(item.cat)} ${F.escapeHtml(item.cat)}</span>
+                <span class="delta-pill ${pillCls}">${diffSign}${F.formatCompact(item.diff)}</span>
+              </div>
+              <div class="cmp-bars">
+                <div class="cmp-bar-line">
+                  <span class="cmp-m-tag">${F.escapeHtml(shortMonthName(monthAName))}</span>
+                  <div class="cmp-track"><div class="cmp-fill-a" style="width:${wA}%"></div></div>
+                  <span class="cmp-num">${F.formatCompact(item.a)}</span>
+                </div>
+                <div class="cmp-bar-line">
+                  <span class="cmp-m-tag" style="color:var(--primary)">${F.escapeHtml(shortMonthName(monthBName))}</span>
+                  <div class="cmp-track"><div class="cmp-fill-b" style="width:${wB}%"></div></div>
+                  <span class="cmp-num">${F.formatCompact(item.b)}</span>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join('') : '<div class="empty-state">Belum ada pengeluaran di 2 bulan ini.</div>'}
+      </section>
+    `;
+  }
+
   global.Components = {
     renderDashboard,
     renderInputForm,
     renderHistoryAndBills,
     renderSavings,
+    renderCompare,
     renderSettingsModal,
     renderSavingsModal
   };
